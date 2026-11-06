@@ -1,0 +1,13 @@
+# 本地运行数据、密钥与日志
+data/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+# 预检报告（含抓帧、音频样本、转写，不入库）
+preflight/evidence/
+preflight/*/evidence/

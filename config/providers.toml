@@ -1,0 +1,33 @@
+# 模型注册表（版本化，随代码提交；本文件不写任何密钥）
+# 唤醒词 -> 配置组 -> provider 实现；真实凭据、端点、模型名一律在 .env 的
+# S2S_<品牌>_* / LLM_<品牌>_* 里，本文件只引用配置组名。
+# 新增一个模型：加一条 [[wakewords]] + 在 .env.example 补一组配置 + 建 preflight 目录。
+
+[defaults]
+session_exclusive = true        # 同一时刻仅一条会话 Pipeline
+memory_scope = "global"         # global | per_provider
+preflight_required = true       # 未通过前置验证的模型不得写适配层
+
+# link = s2s（端到端实时语音）| llm（ASR → LLM → TTS 三段式）
+# provider 对应 app/providers/ 下的实现目录
+[[wakewords]]
+word = "豆包"
+config_group = "S2S_DOUBAO"
+link = "s2s"
+provider = "volcano_s2s"
+
+[[wakewords]]
+word = "大肥鱼"
+config_group = "LLM_DEEPSEEK"
+link = "llm"
+provider = "openai_compat"
+
+[providers.volcano_s2s]
+protocol = "seeduplex"
+audio = "16k_in_24k_out_20ms"
+preflight = "preflight/s2s_doubao/"
+
+[providers.openai_compat]
+protocol = "openai_chat_completions"
+pipeline = "sessions/llm"
+preflight = "preflight/llm_deepseek/"

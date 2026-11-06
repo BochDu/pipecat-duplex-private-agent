@@ -1,0 +1,2 @@
+# shell 脚本入库与检出一律 LF，避免 Windows 侧提交后 Linux 执行出现 \r 报错
+*.sh text eol=lf

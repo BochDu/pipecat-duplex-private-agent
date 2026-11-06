@@ -1,0 +1,23 @@
+[Unit]
+Description=Pipecat duplex voice assistant
+# 等网络就绪，否则开机会先连不上豆包 / DeepSeek 而重试
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 安装时用 sed 把 __USER__ / __REPO__ 替换成实际值（见 docs/setup.md ⑩）
+User=__USER__
+WorkingDirectory=__REPO__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__REPO__/.venv/bin/python -m app.main
+
+# USB 声卡可能比服务晚就绪，失败就隔 5 秒重来
+Restart=always
+RestartSec=5
+
+# 采集与播放都要访问声卡
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

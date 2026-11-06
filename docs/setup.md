@@ -117,7 +117,30 @@ printf 'd òu b āo @豆包\nd à f éi y ú @大肥鱼\n' > data/models/kws/key
 .venv/bin/python -m app.main
 ```
 
-待机后说「豆包」或「大肥鱼」进会话；常驻与开机自启见 `deploy/`。
+待机后说「豆包」或「大肥鱼」进会话。
+
+## ⑩ 开机自启（可选）
+
+仓库自带 [deploy/pipecat-agent.service](../deploy/pipecat-agent.service)，装成 systemd 服务后开机自动进入待机：
+
+```bash
+cd /opt/pipecat-duplex-private-agent
+sudo sed -e "s|__USER__|$(id -un)|g" -e "s|__REPO__|$PWD|g" \
+  deploy/pipecat-agent.service | sudo tee /etc/systemd/system/pipecat-agent.service >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now pipecat-agent
+```
+
+常用命令：
+
+```bash
+systemctl status pipecat-agent       # 是否在跑
+journalctl -u pipecat-agent -f       # 实时看日志（等同前台运行）
+sudo systemctl stop pipecat-agent    # 停止
+sudo systemctl disable pipecat-agent # 取消开机自启
+```
+
+注意两点：服务里写的是仓库的**绝对路径**，换目录后要重新装一次；`USB 声卡可能比服务晚就绪`，服务设置了失败 5 秒后自动重启，所以开机时日志里出现一两次重试属正常。
 
 ## 跑不起来时
 

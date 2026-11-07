@@ -1,0 +1,37 @@
+# 项目元数据与开发工具配置；运行依赖仍以 requirements.txt 为准。
+# 安装开发环境：.venv/bin/python -m pip install -e ".[dev]"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipecat-duplex-private-agent"
+version = "0.1.0"
+description = "Linux 主机上的全双工私有语音智能体"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["pipecat", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

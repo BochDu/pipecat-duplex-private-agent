@@ -12,7 +12,7 @@
 
 ```bash
 sudo apt install -y ffmpeg alsa-utils python3-full python3-venv
-which ffmpeg ffplay arecord aplay amixer
+which ffmpeg arecord aplay amixer
 ```
 
 ## ② 虚拟环境
@@ -23,14 +23,16 @@ python3 -m venv .venv
 .venv/bin/python -V
 ```
 
-## ③ 只读子仓库
+## ③ 只读子仓库（可选）
+
+`pipecat/` 只作参考实现留档，运行时不 import，也不在 `requirements.txt` 里。要翻源码才初始化：
 
 ```bash
 git submodule update --init --depth 1 pipecat
 ls pipecat/pyproject.toml
 ```
 
-只跑 S2S（豆包）可跳过：链路不经过 pipecat，也不需要 `-e ./pipecat`。
+不初始化不影响安装与运行。
 
 ## ④ 依赖安装
 
@@ -147,9 +149,9 @@ sudo systemctl disable pipecat-agent # 取消开机自启
 | 现象 | 处理 |
 | --- | --- |
 | 没声音 / 放到 HDMI 或耳机口 | 设备改成 `plughw:N,0`，重跑 `bash preflight/audio-check.sh` |
-| 声音很小 | `amixer -c 3 sget PCM` 看出厂值，`sset PCM 100%` 拉满 |
+| 声音很小 | `amixer -c <card> sget PCM` 看出厂值，`sset PCM 100%` 拉满（`<card>` 用 `aplay -l` 的编号） |
 | `Device or resource busy` | 残留的 `arecord` 占着设备：`fuser -v /dev/snd/*` |
 | 云端连不上 | `.venv/bin/python preflight/env-check.py --link s2s`，再按 [接入前检查](preflight.md) 逐层定位 |
 | 唤醒不灵 / 误唤醒 | 阈值调整见 [配置参考](config.md) 的唤醒词一节 |
 
-装不上依赖、缺系统包、`pip check` 报冲突时，先确认 Python ≥ 3.11 且子仓库已初始化。
+装不上依赖、缺系统包、`pip check` 报冲突时，先确认 Python ≥ 3.11，并重看 ④ 的 `pip check` 输出。

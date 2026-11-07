@@ -6,14 +6,14 @@
 
 - S2S 实时语音服务：豆包 Seeduplex、千问 Omni 等
 - OpenAI 兼容 LLM：DeepSeek、GPT 等
-- Pipecat 子仓库：Frame 编排、本地音频 I/O；只读、pin commit
+- Pipecat 子仓库：参考实现，只读留档；本项目音频 I/O 走 arecord / aplay 子进程直通，不经 Frame 编排，也不参与安装
 - 其余自研
 
 豆包协议依据见 `preflight/s2s_doubao/` 内的官方 PDF。
 
 ## 一句话架构
 
-常驻进程按**版本化的模型注册表**把唤醒词映射到 Provider，**唤醒即定链路、整场会话不变**；`s2s`（端到端实时语音）与 `llm`（ASR → LLM → TTS）两类通用 Pipeline 复用同一套全局单例后台。同一时刻只有一条会话运行，切换必须先停旧会话、释放资源。零入站端口，只主动出站。
+常驻进程按**版本化的模型注册表**把唤醒词映射到 Provider，**唤醒即定链路、整场会话不变**；`s2s`（端到端实时语音）与 `llm`（ASR → LLM → TTS）两类通用 Pipeline 复用同一套全局单例后台（当前实际共用的只有会话事件与 SQLite 落盘）。同一时刻只有一条会话运行，切换必须先停旧会话、释放资源。零入站端口，只主动出站。
 
 ```mermaid
 flowchart TB
@@ -56,7 +56,7 @@ flowchart TB
 
 3. **统一 Provider 契约（静态）**
 
-   `app/providers/base.py` 固定 `start`、`stop`、`send_audio_frame`、`register_tools`、`is_running`，另有可选的 `cancel_response`（取消服务端进行中的回答，默认空实现）。不做 capabilities 协商、不做运行时发现、不做会话内切换。契约是为了让新增模型不动路由和后台，不是为了抽象而抽象。
+   `app/providers/base.py` 固定 5 个抽象方法 `start`、`stop`、`send_audio_frame`、`register_tools`、`is_running`；`llm` 链路另需 `chat()`（文本流式 + `tool_calls`），`s2s` 链路不需要；可选 `cancel_response`（取消服务端进行中的回答，默认空实现）。不做 capabilities 协商、不做运行时发现、不做会话内切换。契约是为了让新增模型不动路由和后台，不是为了抽象而抽象。
 
 4. **全局单例共享**
 
@@ -76,7 +76,7 @@ flowchart TB
 
 8. **目录合规**
 
-   收尾时做一次目录评审，违规立即整改；`pipecat/` 子模块只读。
+   收尾时做一次目录评审，违规立即整改；`pipecat/` 只读留档，不参与安装与构建。
 
 ## 模型注册表与配置分层
 
@@ -121,22 +121,23 @@ flowchart TB
 | --- | --- | --- |
 | 形态 | 端到端实时语音，单个 WebSocket 会话 | ASR → LLM → TTS |
 | Provider | `volcano_s2s` | `openai_compat`（多品牌共用） |
-| 音频 | 豆包：16 kHz PCM16 上行 / 24 kHz 下行 / 20 ms 帧<br/>其它品牌按各自协议 | 麦克风按 16 kHz 单声道采集<br/>ASR/TTS 规格随选型<br/>播报统一重采样 |
-| 判停 / 打断 | 服务端判停<br/>本地起音或服务端识别开口即停：清待播队列 + 结束 aplay + `response.cancel`<br/>被打断那一轮与「停」这类打断词触发的回话整轮不播 | 端侧 VAD / ASR 断句<br/>停 TTS 播放 + 丢弃当前 LLM 流 + 清空 ASR 缓冲 |
-| 工具 | 服务端函数调用事件 → `role=tool` 回传 | OpenAI 兼容 `tool_calls` → `role=tool` 消息回传 |
-| 上下文 | 会话事件<br/>建连时注入的本地跨会话摘要 | 本地消息数组（`system` / 历史 / 工具结果）<br/>按预算截断 |
-| 结束 | 静默超时 / 显式结束 / 断连<br/>落盘、抽取记忆、交回采集权 | 同左 |
+| 音频 | 豆包：16 kHz PCM16 上行 / 24 kHz 下行 / 20 ms 帧<br/>其它品牌按各自协议 | 麦克风按 16 kHz 单声道采集<br/>ASR/TTS 规格随选型<br/>TTS 音频由 ffmpeg 转 24 kHz 后 aplay 直出 |
+| 判停 / 打断 | 服务端判停<br/>本地起音或服务端识别开口即停：清待播队列 + 结束 aplay + `response.cancel`<br/>被打断那一轮与「停」这类打断词触发的回话整轮不播 | 端侧 VAD / ASR 断句<br/>按轮交互：一句播完再录下一句<br/>播报中打断阶段 5 实现，当前只有 `stop()` 级停播 |
+| 工具 | 服务端函数调用事件 → `role=tool` 回传（当前无工具注册，模型不会下发） | OpenAI 兼容 `tool_calls` → `role=tool` 消息回传（同上） |
+| 上下文 | 会话事件<br/>本地跨会话摘要未实现（阶段 5） | 本地消息数组（`system` / 历史 / 工具结果）<br/>按预算截断 |
+| 结束 | 静默超时 / 显式结束 / 断连<br/>落盘、交回采集权（记忆抽取阶段 5） | 同左 |
 
-两类链路共用：
+两类链路**已经**共用的只有三样：
 
-- 采集权交接
-- 静默超时
-- 同一份工具 Schema
-- 作业与幂等
-- 分级授权
-- 审计
-- SQLite 与笔记索引
-- 微信推送
+- 会话事件（`events.py`）
+- SQLite 落盘（`storage/`）
+- 工具 Schema（`tools/schemas()`；当前没有注册任何工具）
+
+以下仍是目标，尚未抽成公共层：
+
+- 采集权交接：两条链路各写一遍
+- 静默计时：S2S 是「双方都安静」累计 20 s，三段式是起音 8 s / 断句 1.2 s，语义不同
+- 作业与幂等、分级授权、审计、笔记索引、微信推送：阶段 5
 
 **为什么会有三段式**：S2S 把 ASR、判停、TTS 在服务端一次完成；文本 LLM 只收文本，必须由本地 ASR 断句、整句送出、再把流式回复交本地 TTS 播报。这是链路形态差异，不是会话内分段调度。
 
@@ -179,8 +180,8 @@ flowchart TB
 ├── scripts/
 ├── tests/
 ├── patches/
-├── data/
-└── pipecat/                       # 只读子仓库
+├── data/                          # 运行时创建，不入库
+└── pipecat/                       # 只读留档，不参与安装
 ```
 
 红线（评审项）：
@@ -189,7 +190,7 @@ flowchart TB
 2. 不同协议族的模型代码不得混写同一文件（同协议族多品牌共用一份是允许的）
 3. Pipeline 链路逻辑不得硬编码在适配层，必须复用 `sessions/` 模板
 4. 密钥、模型名、唤醒映射不得出现在业务代码
-5. `pipecat/` 及底层总线只读
+5. `pipecat/` 只读，不参与安装与构建
 
 ## 全局唤醒路由与会话生命周期
 
@@ -205,12 +206,12 @@ flowchart TB
 | --- | --- | --- | --- |
 | 待机 | S2S 称呼命中 | 建连中（S2S） | 交出采集权<br/>锁定 Provider<br/>建实时语音会话<br/>建连期上行帧丢弃 |
 | 待机 | LLM 称呼命中 | 建连中（三段式） | 交出采集权<br/>锁定 Provider<br/>起 ASR / TTS 与选中的 LLM 客户端 |
-| 建连中 | 就绪 | 会话中 | 起采集与播报<br/>注入本地摘要<br/>启空闲计时器 |
+| 建连中 | 就绪 | 会话中 | 起采集与播报<br/>注入本地摘要（阶段 5）<br/>启空闲计时器 |
 | 建连中 | 鉴权失败 / 超时 / `error` | 待机 | 采集权交回<br/>语音回告<br/>不重试风暴<br/>不切另一模型 |
-| 会话中 | 插话（本地起音 / 服务端识别开口） | 会话中 | 清空待播队列<br/>结束播放器（管道与 ALSA 缓冲一并丢弃）<br/>发 `response.cancel`<br/>被打断的回话不播<br/>重置空闲计时器 |
+| 会话中 | 插话（仅 S2S：本地起音 / 服务端识别开口） | 会话中 | 清空待播队列<br/>结束播放器（管道与 ALSA 缓冲一并丢弃）<br/>发 `response.cancel`<br/>被打断的回话不播<br/>重置空闲计时器 |
 | 会话中 | 另一称呼命中 | 结束中 → 建连中 | 先停活跃会话、释放连接与音频资源<br/>再启动新会话（强互斥） |
-| 会话中 | 计时器到阈值 / 断连 / 显式结束 | 结束中 | 关闭会话<br/>落盘断点<br/>后台作业继续 |
-| 结束中 | 资源已释放 | 待机 | 落盘 + 记忆抽取 + 采集权交回<br/>唤醒词重新监听 |
+| 会话中 | 计时器到阈值 / 断连 / 显式结束 | 结束中 | 关闭会话<br/>落盘会话事件<br/>后台作业继续（阶段 5） |
+| 结束中 | 资源已释放 | 待机 | 落盘 + 采集权交回<br/>记忆抽取阶段 5<br/>唤醒词重新监听 |
 
 铁律：**同一时刻只有一条 Pipeline 持有麦克风；Provider 在会话创建时绑定，整场不变**。会话期不监听唤醒词作路由，只有"先停后启"的显式切换。
 
@@ -224,6 +225,8 @@ flowchart TB
 ## 共用后台展开
 
 主图把共用后台压成一个节点，这里展开内部。所有 Provider 用的是同一套全局单例，不因 `link` 分叉。
+
+**当前状态**：只有 `events.py` → `storage/` 的会话落盘是实链路；工具池没有任何 `ToolSpec`，作业与调度是骨架，记忆抽取、笔记索引、推送、审计均未接调用链。下表「状态」列以代码为准。
 
 ```mermaid
 flowchart TB
@@ -251,15 +254,15 @@ flowchart TB
 
 共享层不感知 `link`、不生成厂商字段；唯一适配点是链路侧翻译自家事件。
 
-多 `call_id` 聚合、幂等键、分级授权、审计、长任务与降级推送都在工具池 / 作业内。契约测试只断言：**新增任一 Provider 或品牌，`tools/` / `jobs/` / `memory/` / `storage/` 零改动**。
+多 `call_id` 聚合、幂等键、分级授权、审计、长任务与降级推送都在工具池 / 作业内。这些能力目前只有接口，没有调用链（工具池为空，因此模型不会下发 `tool_calls`）。契约测试只断言：**新增任一 Provider 或品牌，`tools/` / `jobs/` / `memory/` / `storage/` 零改动**。
 
-| 模块 | 细节 | 出口 / 落点 |
-| --- | --- | --- |
-| `app/tools/` | search / notes / notify / scheduler / files / memory / system<br/>同一份 Schema 生成 S2S 工具定义与 LLM `tools`<br/>分级授权内存态 `(session_id, scope)`，单次、本会话有效 | 即时结果回发起链路<br/>`tool_logs` 审计 |
-| `app/jobs/` + `scheduler/` | 长工具异步化、定时任务、APScheduler 幂等恢复<br/>幂等键按 `call_id` 或任务 ID + 计划时间生成 | 结果回送当前会话<br/>会话已结束则降级微信推送 |
-| `app/events.py` + `storage/` | 统一事件落 SQLite<br/>`conversations` 用 `link` 标记来源 | 表清单见「数据与分级」 |
-| `app/notes/` + `memory/` | `NOTES_DIR` 只读建索引、原文不入库<br/>会话结束统一抽取记忆<br/>本地摘要器保证 `local-only` 零出网 | `DATA_DIR` 读写，不与 `NOTES_DIR` 共用路径 |
-| 出站与白名单 | `OUTBOUND_ALLOWLIST` 仅注册表内各服务 / 检索 / 微信推送<br/>零入站端口 | 检索 API / WxPusher |
+| 模块 | 细节 | 出口 / 落点 | 状态 |
+| --- | --- | --- | --- |
+| `app/tools/` | search / notes / notify / scheduler / files / memory / system<br/>同一份 Schema 生成 S2S 工具定义与 LLM `tools`<br/>分级授权内存态 `(session_id, scope)`，单次、本会话有效 | 即时结果回发起链路<br/>`tool_logs` 审计 | 骨架：`ToolSpec` / `ToolRegistry` 已定义，0 个工具注册 |
+| `app/jobs/` + `scheduler/` | 长工具异步化、定时任务、APScheduler 幂等恢复<br/>幂等键按 `call_id` 或任务 ID + 计划时间生成 | 结果回送当前会话<br/>会话已结束则降级微信推送 | 骨架：`Scheduler.start()` 只打日志，`JobManager.submit()` 无调用方 |
+| `app/events.py` + `storage/` | 统一事件落 SQLite<br/>`conversations` 用 `link` 标记来源<br/>写入走内存队列 + 后台批量提交 | 表清单见「数据与分级」 | 已用 |
+| `app/notes/` + `memory/` | `NOTES_DIR` 只读建索引、原文不入库<br/>会话结束统一抽取记忆<br/>本地摘要器保证 `local-only` 零出网 | `DATA_DIR` 读写，不与 `NOTES_DIR` 共用路径 | 骨架：`reindex()` / `remember()` / `extract()` 均无调用方 |
+| 出站与白名单 | `OUTBOUND_ALLOWLIST` 仅注册表内各服务 / 检索 / 微信推送<br/>零入站端口 | 检索 API / WxPusher | 仅配置项，无出站实现 |
 
 ## API 约束（豆包 Seeduplex，官方依据）
 
@@ -272,21 +275,21 @@ flowchart TB
 | 会话 | 上行：`session.create`、`session.update`、`session.close`<br/>下行：`session.created`（含 `session.id`）、`session.updated`、`session.closed` |
 | 必选 | `session.model` = `1.2.6.1`<br/>`session.audio`（object）<br/>`session.audio.output.voice`<br/>`session.tools` 为标准 JSON Schema |
 | 上行 | `pcm` / 16 kHz / 单声道 / 20 ms 分片（640 B）<br/>Base64 放 JSON 文本帧<br/>严格实时节奏 |
-| 保活 | 依赖上行音频流<br/>关麦 `input_audio_mute.commit`<br/>恢复 `input_audio_unmute.commit` |
-| 打断 | 上行 `response.cancel` → 下行 ack `response.canceled`<br/>被取消的 `response_id` 永久丢弃，其余按「取消窗口 + 打断词抑制」兜底<br/>用户开口由 `conversation.item.input_audio_transcription.started` 上报 |
+| 保活 | 当前只靠上行音频流本身保活<br/>`input_audio_mute.commit` / `input_audio_unmute.commit` 为协议支持项，代码未使用 |
+| 打断 | 上行 `response.cancel` → 下行 ack `response.canceled`<br/>最近 16 个被取消的 `response_id` 丢弃（`CANCELLED_KEEP`），其余按「取消窗口 + 打断词抑制」兜底<br/>用户开口由 `conversation.item.input_audio_transcription.started` 上报 |
 | 下行 | `pcm_s16le` / 24 kHz，`response.output_audio.delta` Base64<br/>播放端解码并重采样 |
 | 容量 | 64K tokens 总量<br/>`conversation.item.create` 单次 ≤ 20 轮 / 40 条，分批提交 |
 | 工具 | `response.function_call_arguments.done.items[]` 可含多个并行调用<br/>一次 `conversation.item.create` 的 `items[]` 可带多个 `role=tool` 条目 |
 
 字段层级（易错点）：`extension` 与 `session` 平级，`voice` 在 `session.audio.output` 下。
 
-`dialog_context` 为 `{role,text,timestamp}` 成对 QA，仅建连时注入；`conversation.item.create` 用 `items[].{type:message,role,content[]}`，两者不重复注入。
+`dialog_context` 为 `{role,text,timestamp}` 成对 QA，协议上仅建连时注入；当前未使用（没有摘要器，阶段 5）。`conversation.item.create` 用 `items[].{type:message,role,content[]}`，两者不重复注入。
 
 本节范围之外：
 
 - 二进制帧与私有事件
 - 静默停发上行
-- S2S 链路的本地 VAD 判停
+- 本地 VAD 断句：只做整场静默超时（`SILENCE_TIMEOUT_SEC`），不按句判停
 - 四元组鉴权
 - 16 kHz 下行
 - 豆包 `extension` 可选项
@@ -295,25 +298,25 @@ flowchart TB
 
 | 环节 | 约定 |
 | --- | --- |
-| ASR（全局一套，`.env` 切换） | 16 kHz 单声道 PCM，流式转写<br/>断句后整句送入 LLM<br/>final 转写落盘 |
+| ASR（全局一套，`.env` 切换） | 16 kHz 单声道 PCM，录完整句后一次送识别（非流式）<br/>断句后整句送入 LLM<br/>识别文本落库 |
 | LLM（云端，`LLM_<品牌>_*`） | 消息数组 `system / user / assistant / tool`<br/>流式增量<br/>`tool_calls` 执行完本地工具后以 `role=tool` 回传再续答 |
-| TTS（全局一套，`.env` 切换） | 流式合成、边合成边播<br/>打断即清空播放缓冲<br/>输出统一重采样 |
-| 打断 | 停播 + 丢弃当前 LLM 流 + 清空 ASR 缓冲<br/>未确认的指令不执行 |
+| TTS（全局一套，`.env` 切换） | 合成完一句播一句<br/>ffmpeg 统一转 24 kHz 后 aplay 直出 |
+| 打断 | 会话内按轮进行：播报期间不录音，插话要等这一句播完<br/>`stop()` 只用于结束会话或切换链路 |
 | 失败 | 任一环节失败 → 语音回告、结束会话回待机<br/>不自动切到 S2S 链路 |
-| 时延 | 首句时延、断句准确率、打断停播一帧内生效<br/>实测留证 |
+| 时延 | 首句时延、断句准确率<br/>实测留证 |
 
-出网边界：默认只有转写文本、必要上下文与工具结果发往当前 LLM，音频不出本机。若 ASR / TTS 改用云，须同步更新白名单与隐私说明。
+出网边界：ASR（火山）与 TTS（edge-tts）都是云服务，S2S 的上行音频、三段式的整句录音、待合成文本都会出网；三段式只把转写文本、必要上下文与工具结果发给当前 LLM。本地笔记原文不出网。`OUTBOUND_ALLOWLIST` 必须覆盖 S2S / ASR / TTS / LLM 四类域名。
 
-组合规则：**一个项目一套 ASR、一套 TTS**，在 `.env` 全局单选、改配置即换厂商（厂商凭据命名 `ASR_<品牌>_*` / `TTS_<品牌>_*`）；**多唤醒词对应多 LLM**，由注册表路由。不做唤醒词条目级的 ASR/TTS 覆盖，其他组合情况不考虑。TTS 当前用 edge-tts（免费、无需凭据）；云 ASR 火山一句话识别预检中（与豆包 S2S 同一控制台同一账号）。
+组合规则：**一个项目一套 ASR、一套 TTS**，在 `.env` 全局单选、改配置即换厂商（厂商凭据命名 `ASR_<品牌>_*` / `TTS_<品牌>_*`）；**多唤醒词对应多 LLM**，由注册表路由。不做唤醒词条目级的 ASR/TTS 覆盖，其他组合情况不考虑。当前实现：TTS 用 edge-tts（免费、无需凭据），ASR 用火山一句话识别，均已接入，预检留证见 `preflight/asr_volcano/` 与 `preflight/tts_edge/`。
 
 ## 数据与分级
 
-| 表 | 内容 |
-| --- | --- |
-| `conversations` | 会话、`link` 标记、断点、转写、模型文本、用量<br/>本地保留全量历史 |
-| `tasks` / `task_runs` / `background_jobs` | 任务、执行记录、幂等键<br/>作业状态与回送目标 `job_id` |
-| `memories` / `notes_index` | 记忆<br/>笔记库只读索引（含 `sensitivity`） |
-| `push_logs` / `tool_logs` | 审计：关联 ID、`call_id`、授权范围与时间 |
+| 表 | 内容 | 写入状态 |
+| --- | --- | --- |
+| `conversations` | 会话、`link`、角色、文本、音频时长、用量<br/>本地保留全量历史 | 已写入：一轮一行（用户一句、回答一段），`record()` 入队后每 0.5 s 批量提交 |
+| `tasks` / `task_runs` / `background_jobs` | 任务、执行记录、幂等键<br/>作业状态与回送目标 `job_id` | 仅建表 |
+| `memories` / `notes_index` | 记忆<br/>笔记库只读索引（含 `sensitivity`） | 仅建表：`remember()` / `reindex()` 无调用方 |
+| `push_logs` / `tool_logs` | 审计：关联 ID、`call_id`、授权范围与时间 | 仅建表 |
 
 | 级别 | 范围 | 回流模型 | 微信推送 |
 | --- | --- | --- | --- |
@@ -330,7 +333,7 @@ flowchart TB
 5. 仅摘要与来源标识回传
 6. 模型作答
 
-授权是内存态，键 `(session_id, scope)`：
+授权是内存态，键 `(session_id, scope)`（接口已定义，调用链未接：`grant()` / `audit_entry()` 目前无调用方）：
 
 - S2S 取服务端会话 ID
 - 三段式用本地会话 ID
@@ -356,9 +359,9 @@ flowchart TB
 
 ## 依赖与版本
 
-`pipecat/` 以 pin commit 引入、只读，不混用 PyPI 发行版；Python 与依赖版本锁定，以子仓库 `pyproject.toml` 为准。
+`requirements.txt` 声明范围约束（`>=`），**当前没有 lock 文件**；`pipecat/` 只读留档，不参与安装，也不在依赖里。运行时依赖 `websockets` / `httpx` / `edge-tts` / `sherpa-onnx` / `vosk`，Python < 3.11 时另需 `tomli`。
 
-版本锚点（升级准入单元）：
+版本锚点（升级准入单元）**尚未落地**（阶段 4 门禁）：
 
 - 子仓库 commit
 - 各品牌凭据版本
@@ -382,15 +385,15 @@ flowchart TB
 
 | 检查项 | 方法 | 通过判据 |
 | --- | --- | --- |
-| 注册表与互斥 | 逐条 `[[wakewords]]` 各唤醒 10 轮<br/>任意顺序切换四组 | 每个称呼绑定 100% 正确<br/>先停后启、无双 Pipeline、无串音、无设备冲突<br/>待机连接数为 0 |
-| 每模型 preflight | 各品牌目录跑自检<br/>S2S：建连 / 上下行 / 打断<br/>LLM：流式 + `tool_calls` + `role=tool` | 通过且留证后才允许写该模型的适配层<br/>密钥不进日志 |
-| 三段式往返 | ASR 断句 → LLM → TTS 播报<br/>逐项触发打断 | 可听无爆音<br/>首句时延留证<br/>音频不出本机<br/>打断一帧内停播 |
-| 共享层复用 | 四类会话各触发同一工具 / 作业 / 记忆抽取 | 落盘格式一致<br/>`role=tool` 两种格式由链路侧翻译<br/>幂等键生效<br/>后台模块零改动 |
-| 上下文 | S2S：64K 预算边界、40 条分批<br/>LLM：消息数组预算、打断后续答 | 不超限、分批被 ack<br/>打断后不续答、不重复播报 |
+| 注册表与互斥 | 逐条 `[[wakewords]]` 各唤醒 10 轮<br/>任意顺序切换两组（后续扩到四组） | 每个称呼绑定 100% 正确<br/>先停后启、无双 Pipeline、无串音、无设备冲突<br/>待机连接数为 0 |
+| 每模型 preflight | 各品牌目录跑自检<br/>S2S：建连 / 上下行 / 打断<br/>LLM：流式；`tool_calls` / `role=tool` 需先注册 ≥1 个 public 工具（阶段 5） | 通过且留证后才允许写该模型的适配层<br/>密钥不进日志 |
+| 三段式往返 | ASR 断句 → LLM → TTS 播报 | 可听无爆音<br/>首句时延留证<br/>音频不出本机 |
+| 共享层复用（阶段 5 门禁） | 两类会话各触发同一工具 / 作业 / 记忆抽取 | 当前无工具可触发，本项暂不适用<br/>通过时要求落盘格式一致<br/>`role=tool` 两种格式由链路侧翻译<br/>幂等键生效<br/>后台模块零改动 |
+| 上下文 | S2S：64K 预算边界、40 条分批<br/>LLM：消息数组预算 | 不超限、分批被 ack<br/>S2S 被打断后不再续播、不重复播报 |
 | 分级与出网 | 各链路触发 `local-only` 检索 / 授权 / 推送 | `local-only` 零出网（含各 LLM 服务）<br/>授权单次有效<br/>出站仅白名单 |
 | 错误与降级 | 鉴权失败、节奏异常<br/>ASR/TTS 故障、上下文超限 | 每类有分类、日志与降级动作<br/>按状态机回待机<br/>不跨链路切换 |
 | 稳定性 | 长时间静默<br/>网络异常<br/>高频切换 | 会话自动销毁<br/>连接回收<br/>无内存/任务泄漏 |
-| 运行时基线 | x86 / ARM / 容器锁定 Python 与依赖版本 | 两类最小流水线可 import 并跑通<br/>冲突结论写入锚点 |
+| 运行时基线 | x86 / ARM / 容器固定基线环境（Python 版本 + `requirements.txt` 清单）并留证 | 两类最小流水线可 import 并跑通<br/>实测版本写进留证 |
 
 ## 范围之外
 

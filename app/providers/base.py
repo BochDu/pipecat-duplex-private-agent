@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any
 
 from app.events import SessionEvent
 
@@ -62,6 +62,17 @@ class BaseProvider(abc.ABC):
 
     async def cancel_response(self) -> None:
         """取消服务端进行中的回答；默认无操作，由支持的 Provider 覆写。"""
+
+    async def chat(
+        self, messages: list[dict[str, Any]]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """文本流式对话：`llm` 链路必需，`s2s` 链路不实现。
+
+        产出 `{"type": "text", "delta": str}` 或
+        `{"type": "tool_calls", "calls": [...]}`。
+        """
+        raise NotImplementedError(f"{type(self).__name__} 不支持 chat()")
+        yield  # 保持 async generator：调用方 async for 时才报错
 
     @abc.abstractmethod
     async def start(self) -> None:

@@ -89,14 +89,15 @@ class LLMPipeline:
         while self._running:
             buffer: list[str] = []
             tool_calls: list[dict] | None = None
-            async for item in self._provider.chat(messages):  # type: ignore[attr-defined]
+            async for item in self._provider.chat(messages):
                 if item["type"] == "text":
-                    buffer.append(item["delta"])
-                    self._emit("assistant", item["delta"])
+                    buffer.append(item["delta"])  # 先攒着，一轮只落一行
                 elif item["type"] == "tool_calls":
                     tool_calls = item["calls"]
 
             text = "".join(buffer)
+            if text:
+                self._emit("assistant", text)
             if not tool_calls:
                 messages.append({"role": "assistant", "content": text})
                 return text

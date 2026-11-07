@@ -1,11 +1,11 @@
 # 全双工私有语音智能体
 
-Linux 主机上的个人实时语音智能体：本地数据与编排私有可控、可随时打断、联动本地工具。
+Linux 主机上的个人实时语音智能体：本地数据与编排私有可控、S2S 链路可随时打断。本地工具、笔记、定时任务与推送属阶段 5，当前工具池为空。
 
 ## 快速开始
 
 ```bash
-git clone --recurse-submodules https://github.com/BochDu/pipecat-duplex-private-agent.git
+git clone https://github.com/BochDu/pipecat-duplex-private-agent.git
 cd pipecat-duplex-private-agent
 
 # 1. 系统依赖与虚拟环境

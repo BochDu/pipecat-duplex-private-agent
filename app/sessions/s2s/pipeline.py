@@ -44,9 +44,10 @@ SEND_TIMEOUT = 6.0
 
 BARGE_MIN_SEC = 0.25  # 人声要连续这么久才算打断：压掉吸气、爆音、回采残响
 BARGE_COOLDOWN_SEC = 0.8  # 两次打断的最小间隔，同一句话不反复取消
-PLAY_TAIL_SEC = 1.5  # 管道与 ALSA 缓冲的余量：刚写完播放器仍算「在播」
+PLAY_REMAIN_MIN = 0.2  # 剩余待播时长低于这个值就认为已经播完，避免空打断
 PLAYER_SETTLE_SEC = 0.15  # 首播时等 aplay 打开声卡
 PLAYER_REOPEN_SEC = 0.05  # 打断后重建只做最短确认，换来起播更快
+REOPEN_PREROLL_MS = 60  # 重建后补的静音：抵消声卡重开的起播丢帧
 
 
 class S2SPipeline:
@@ -71,6 +72,8 @@ class S2SPipeline:
         self._respawn = False  # 打断后由播放循环重建 aplay
         self._epoch = 0  # 播放代次：打断即 +1，旧代次音频作废
         self._last_write_at = float("-inf")
+        self._written_total = 0  # 本段已写入播放器的字节，用于估算剩余时长
+        self._play_started_at = 0.0
         self._interrupted_at = float("-inf")
         self._cancel_tasks: set[asyncio.Task] = set()
         self._barge_in = self._barge_enabled()
@@ -154,6 +157,7 @@ class S2SPipeline:
         self._epoch += 1
         self._respawn = True
         self._last_write_at = float("-inf")
+        self._written_total = 0
         self._interrupted_at = now
         player = self._player
         if player is not None and player.returncode is None:
@@ -175,11 +179,32 @@ class S2SPipeline:
         return getattr(self._provider, "current_response_id", "") or "(空)"
 
     def _is_playing(self) -> bool:
-        """队列里还有待播，或刚写过播放器（管道与 ALSA 缓冲里仍有声音）。"""
+        """队列里有待播，或按已播进度估算还有剩余音频没放完。
+
+        用「已写入 - 实时进度」而不是固定尾窗：固定尾窗会在回答自然播完后
+        仍把用户开口当成插话，白发一次 cancel 并把下一轮开头吞掉。
+        """
         queue = self._audio_queue
         if queue is not None and not queue.empty():
             return True
-        return time.monotonic() - self._last_write_at < PLAY_TAIL_SEC
+        remain = self._pending_bytes(time.monotonic())
+        return remain > PLAY_REMAIN_MIN * PLAYBACK_RATE * 2
+
+    def _pending_bytes(self, now: float) -> float:
+        """估算尚未播出的字节数；`aplay` 以实时速率消费，进度按时间折算。"""
+        if self._written_total <= 0:
+            return 0.0
+        played = max(0.0, now - self._play_started_at) * PLAYBACK_RATE * 2
+        return self._written_total - played
+
+    def _note_written(self, size: int) -> None:
+        """记一次写入：上一段已播完就重新起算，否则继续累加。"""
+        now = time.monotonic()
+        if self._pending_bytes(now) <= 0:
+            self._written_total = 0
+            self._play_started_at = now
+        self._written_total += size
+        self._last_write_at = now
 
     def _drop_pending(self) -> int:
         """清空待播队列，返回丢弃的字节数。"""
@@ -263,9 +288,11 @@ class S2SPipeline:
             )
         return player
 
-    async def _prime_player(self, player: asyncio.subprocess.Process) -> None:
+    async def _prime_player(
+        self, player: asyncio.subprocess.Process, ms: int = PREROLL_MS
+    ) -> None:
         """先喂一段静音，抵消 aplay 打开声卡后的起播丢帧。"""
-        silence = b"\x00" * (PLAYBACK_RATE * 2 * PREROLL_MS // 1000)
+        silence = b"\x00" * (PLAYBACK_RATE * 2 * ms // 1000)
         try:
             assert player.stdin is not None
             player.stdin.write(silence)
@@ -318,11 +345,14 @@ class S2SPipeline:
     async def _reopen_player(self) -> asyncio.subprocess.Process:
         """打断后重建 aplay：旧进程结束即丢掉管道与 ALSA 里的残留音频。
 
-        新进程交给调用方接管，避免与会话结束时的释放并发。
+        新进程交给调用方接管，避免与会话结束时的释放并发；重建后同样预热，
+        否则声卡重开的头几十毫秒会被丢掉，听感是句首「噎一下」。
         """
         old, self._player = self._player, None
         await self._close_player(old)
-        return await self._spawn_player(self._out_device, PLAYER_REOPEN_SEC)
+        player = await self._spawn_player(self._out_device, PLAYER_REOPEN_SEC)
+        await self._prime_player(player, REOPEN_PREROLL_MS)
+        return player
 
     async def _upstream(self, recorder: MicRecorder, silence_sec: float) -> None:
         """麦克风帧流持续上行；静默超时或 Provider 断开则结束会话。
@@ -428,4 +458,4 @@ class S2SPipeline:
                 ) from exc
             if self._epoch == epoch:
                 self._played_bytes += len(chunk)
-                self._last_write_at = time.monotonic()
+                self._note_written(len(chunk))

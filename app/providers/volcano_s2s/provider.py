@@ -83,6 +83,7 @@ class VolcanoS2SProvider(BaseProvider):
         # 已取消的回答：按 response_id 丢弃，不依赖时间窗口；只留最近若干个
         self._cancelled_ids: deque[str] = deque(maxlen=CANCELLED_KEEP)
         self._last_response_id = ""
+        self._answer_parts: list[str] = []  # 一轮回答的文本，结束时拼成一行落库
         self._onset = OnsetBoost(
             boost_db=self._onset_boost_db(),
             seconds=self._onset_sec(),
@@ -170,6 +171,7 @@ class VolcanoS2SProvider(BaseProvider):
         self._speaking_user = False
         self._cancelled_ids.clear()
         self._last_response_id = ""
+        self._answer_parts.clear()
         logger.info(
             "豆包会话已建立：session.id=%s，音量 %d%%（loudness %+d），响度均衡=%s",
             self._session_id or "(空)",
@@ -343,6 +345,7 @@ class VolcanoS2SProvider(BaseProvider):
         if self._last_response_id:
             # 记下被打断的回答：它后续的 delta 一律丢，网络抖动也不漏
             self._cancelled_ids.append(self._last_response_id)
+        self._answer_parts.clear()  # 被打断的那一轮不落库
         self._muted = True
         self._quiet_until = now + CANCEL_GUARD_SEC
         try:
@@ -355,6 +358,21 @@ class VolcanoS2SProvider(BaseProvider):
             self._running = False
         except Exception as exc:  # noqa: BLE001 - 取消失败不影响本地停播
             logger.warning("取消回答失败：%s", exc)
+
+    def _flush_answer(self) -> None:
+        """把一轮回答拼成一行落库；被静默的那一轮直接丢弃。"""
+        text = "".join(self._answer_parts).strip()
+        self._answer_parts.clear()
+        if not text or self._muted:
+            return
+        self.emit(
+            SessionEvent(
+                session_id=self._session_id,
+                link="s2s",
+                role="assistant",
+                text=text,
+            )
+        )
 
     def _is_stop_word(self, text: str) -> bool:
         """短句且含打断词：判成「让它停」，不当成一次提问。
@@ -408,6 +426,7 @@ class VolcanoS2SProvider(BaseProvider):
             logger.warning("豆包下行中断：%s", exc)
         finally:
             self._running = False
+            self._flush_answer()  # 断在中途也要把已生成的文本落下
 
     async def _handle_event(self, event: dict) -> None:
         etype = event.get("type", "")
@@ -430,11 +449,13 @@ class VolcanoS2SProvider(BaseProvider):
                 or time.monotonic() < self._quiet_until
             )
             if self._muted:
+                self._answer_parts.clear()
                 logger.info("丢弃被打断的回答（不播报）")
             return
 
         if etype == "response.output_audio.done":
             self._log_segment_levels()
+            self._flush_answer()  # 兜底：没收到 output_text.done 时也落一行
             return
 
         if etype in {"response.output_audio.delta", "response.audio.delta"}:
@@ -455,6 +476,7 @@ class VolcanoS2SProvider(BaseProvider):
 
         if etype == "response.canceled":
             self._muted = True
+            self._answer_parts.clear()
             logger.info("服务端已确认取消回答")
             return
 
@@ -465,14 +487,15 @@ class VolcanoS2SProvider(BaseProvider):
         }:
             text = event.get("delta") or event.get("text") or ""
             if text and not self._muted:
-                self.emit(
-                    SessionEvent(
-                        session_id=self._session_id,
-                        link="s2s",
-                        role="assistant",
-                        text=text,
-                    )
-                )
+                # 先攒着：一轮回答只落一行，不逐 delta 写库
+                self._answer_parts.append(text)
+            return
+
+        if etype == "response.output_text.done":
+            full = event.get("text") or ""
+            if full and not self._muted:
+                self._answer_parts = [full]  # 以完整文本为准，避免 delta 漏字
+            self._flush_answer()
             return
 
         if etype == "conversation.item.input_audio_transcription.started":
@@ -517,7 +540,7 @@ class VolcanoS2SProvider(BaseProvider):
             logger.warning("识别失败：%s", event.get("error") or event)
             return
 
-        if etype in {"response.output_text.done", "input_audio_buffer.committed"}:
+        if etype == "input_audio_buffer.committed":
             logger.debug("下行事件：%s", etype)
             return
 

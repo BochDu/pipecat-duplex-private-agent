@@ -74,6 +74,8 @@ S2S 播报中检测到人声连续 250 ms 过阈值，就清空待播队列、�
 
 打断词只按“整句等于该词”“多字词包含”“单字词重复”三种情况命中，正常提问里出现的同字不触发。误打断就调高 `S2S_BARGE_IN_RMS` 或把 `S2S_BARGE_IN` 置 0，不要靠加长 250 ms 门限——那等于直接增加停声延迟。外放场景的残响会抬高持续 RMS，先处理回声（耳机、降 `S2S_DOUBAO_LOUDNESS`、AEC），再抬阈值。
 
+打断相关的三个键在会话启动时读取一次（`S2SPipeline` 构造时快照），改完要重启进程才生效：前台运行时 Ctrl-C 重跑；装了 systemd 服务则 `sudo systemctl restart pipecat-agent`。
+
 ## 豆包 S2S
 
 | 键 | 缺省 |

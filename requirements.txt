@@ -1,7 +1,5 @@
 # Python >= 3.11
-# Pipecat 取自本地只读子仓库，不安装 PyPI 上的 pipecat-ai 发行版
--e ./pipecat
-
+# 范围约束，无 lock 文件；pipecat 子仓库只读留档，不参与安装
 # 最小建连自检直接用到的依赖
 websockets>=13.1
 

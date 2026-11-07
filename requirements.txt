@@ -11,5 +11,4 @@ edge-tts>=6.1
 sherpa-onnx>=1.10
 vosk>=0.3.45
 
-# Python < 3.11 时的 TOML 解析后备（3.11+ 用标准库 tomllib）
-tomli>=2.0; python_version < "3.11"
+# TOML 解析用标准库 tomllib（Python >= 3.11），不需要额外依赖

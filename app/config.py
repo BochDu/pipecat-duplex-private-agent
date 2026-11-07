@@ -11,13 +11,9 @@
 from __future__ import annotations
 
 import os
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-
-try:  # Python >= 3.11 自带
-    import tomllib
-except ModuleNotFoundError:  # < 3.11 走 tomli（requirements 已按版本声明）
-    import tomli as tomllib  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parent.parent
 

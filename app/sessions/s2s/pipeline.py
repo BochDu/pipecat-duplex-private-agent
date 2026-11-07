@@ -128,9 +128,11 @@ class S2SPipeline:
                     raise exc
         finally:
             self._running = False
-            await recorder.stop()
-            player, self._player = self._player, None
-            await close_player(player)
+            try:
+                await recorder.stop()
+            finally:
+                player, self._player = self._player, None
+                await close_player(player)
             logger.info(
                 "S2S 会话结束（下行共播放 %.1fs）",
                 self._played_bytes / (PLAYBACK_RATE * 2),
@@ -357,7 +359,7 @@ class S2SPipeline:
                 self._respawn = False
                 player = await self._reopen_player()
                 if not self._running:  # 重建期间会话结束：别把新进程漏掉
-                    await self._close_player(player)
+                    await close_player(player)
                     return
                 self._player = player
                 continue

@@ -3,7 +3,7 @@
 音频直接与关键词的拼音序列匹配，不经过「先识别成文字再比对」，
 因此自造词不需要训练、也不依赖语言模型里有没有这个词。
 
-模型与关键词文件见 preflight/README.md「唤醒词」。
+模型与关键词文件见 docs/setup.md「⑧ 唤醒词模型」与 docs/config.md。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def find_models(directory: Path) -> tuple[str, str, str]:
     """
     if not directory.is_dir():
         raise RuntimeError(
-            f"KWS 模型目录不存在：{directory}（下载见 preflight/README.md「唤醒词」）"
+            f"KWS 模型目录不存在：{directory}（下载见 docs/setup.md「⑧ 唤醒词模型」）"
         )
     for encoder in _candidates(directory, "encoder"):
         spec = encoder.name[len("encoder-") :].replace(".int8.onnx", "").replace(".onnx", "")
@@ -119,7 +119,7 @@ class KwsWakeListener(WakeListener):
         if not self._keywords_file.is_file():
             raise RuntimeError(
                 f"关键词文件不存在：{self._keywords_file}"
-                "（用 sherpa-onnx-cli text2token 生成，见 preflight/README.md「唤醒词」）"
+                "（拼音 token 写法见 docs/config.md，安装见 docs/setup.md「⑧ 唤醒词模型」）"
             )
         tokens = self._model_dir / "tokens.txt"
         encoder, decoder, joiner = find_models(self._model_dir)

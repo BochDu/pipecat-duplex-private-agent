@@ -6,13 +6,13 @@
 
 - Python 3.11+
 - 麦克风与扬声器各一（USB 会议音箱可同时充当两者）
-- 出站网络：火山引擎、DeepSeek
+- 出站网络：火山引擎、DeepSeek、edge-tts（`speech.platform.bing.com`）
 
 ## ① 系统依赖
 
 ```bash
-sudo apt install -y ffmpeg alsa-utils python3-full python3-venv
-which ffmpeg arecord aplay amixer
+sudo apt install -y ffmpeg alsa-utils python3-full python3-venv aria2c
+which ffmpeg arecord aplay amixer aria2c
 ```
 
 ## ② 虚拟环境
@@ -72,11 +72,12 @@ chmod 600 .env
 nano .env
 ```
 
-只填两个 key，其余默认值已随代码入库：
+全功能需要三个 key，其余默认值已随代码入库（只跑 S2S 单链路调试时可只填前两个）：
 
 ```env
 S2S_DOUBAO_API_KEY=...
 LLM_DEEPSEEK_API_KEY=...
+ASR_VOLCANO_API_KEY=...
 ```
 
 设备名几乎都要自己写（`default` 在多数 USB 声卡上打不开采集），照 ⑤ 或下一个体检步骤的报告填：

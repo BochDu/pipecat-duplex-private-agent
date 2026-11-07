@@ -66,7 +66,7 @@ class WakeRouter:
                 provider.register_tools(self._ctx.tools)
                 await provider.start()
             except Exception as exc:  # noqa: BLE001 - 建连失败统一回退
-                logger.warning("建连失败（%s）：%s", entry.provider, exc)
+                logger.warning("建连失败（%s）：%s", entry.provider, exc, exc_info=True)
                 await self._release()
                 return False
 
@@ -79,7 +79,7 @@ class WakeRouter:
         except NotImplementedError as exc:
             logger.warning("会话编排未实现：%s", exc)
         except Exception as exc:  # noqa: BLE001 - 会话异常不让进程崩
-            logger.warning("会话异常：%s", exc)
+            logger.warning("会话异常：%s", exc, exc_info=True)
         finally:
             async with self._lock:
                 await self._release()
@@ -142,21 +142,30 @@ class WakeRouter:
         )
 
     async def _release(self) -> None:
-        """释放当前会话（调用方需持有锁或确保独占）。"""
+        """释放当前会话（调用方需持有锁或确保独占）；任一步失败都不阻断其余清理。"""
         if self._provider is None:
             self._state = SessionState.IDLE
             return
         self._state = SessionState.STOPPING
         try:
             if self._pipeline is not None:
-                await self._pipeline.stop()
-            await self._provider.stop()
+                try:
+                    await self._pipeline.stop()
+                except Exception:  # noqa: BLE001 - 继续释放 Provider
+                    logger.exception("会话编排停止失败")
+            try:
+                await self._provider.stop()
+            except Exception:  # noqa: BLE001 - 仍需回到待机
+                logger.exception("Provider 停止失败")
         finally:
             self._provider = None
             self._pipeline = None
             if self._session_id:
-                self._ctx.tools.revoke(self._session_id)
-                self._session_id = ""
+                try:
+                    self._ctx.tools.revoke(self._session_id)
+                except Exception:  # noqa: BLE001 - 授权回收失败不阻断回待机
+                    logger.exception("工具授权回收失败")
+            self._session_id = ""
             self._state = SessionState.IDLE
 
     def _on_audio(self, pcm: bytes) -> None:

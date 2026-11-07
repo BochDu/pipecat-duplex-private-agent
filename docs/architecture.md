@@ -86,7 +86,7 @@ flowchart TB
 | `.env`（模板 `.env.example`） | 私有、不入库 | 只放凭据；设备名等机器差异需要时覆盖 | 使用者，每台机器一份 |
 | `config/providers.toml` | 版本化、随代码提交 | 唤醒词、配置组名、链路形态<br/>Provider 实现、会话模板（`pipeline`）、协议族、preflight 归属 | 开发者，加模型时改 |
 
-这不是三个「个人配置入口」：每天要动的只有 `.env` 里的两个 key。覆盖顺序 `config/defaults.env` < `.env` < 真实环境变量，可调项见 [配置参考](config.md)。
+这不是三个「个人配置入口」：全功能要动的只有 `.env` 里的三个 key。覆盖顺序 `config/defaults.env` < `.env` < 真实环境变量，可调项见 [配置参考](config.md)。
 
 命名规范 `<链路>_<品牌>_<字段>`，全大写加下划线：
 

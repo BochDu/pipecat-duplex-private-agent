@@ -9,5 +9,7 @@ edge-tts>=6.1
 
 # 离线唤醒词：sherpa-onnx 关键词检测
 sherpa-onnx>=1.10
+# KWS 逐帧把 PCM 转成 float32，代码直接 import
+numpy>=1.24
 
 # TOML 解析用标准库 tomllib（Python >= 3.11），不需要额外依赖

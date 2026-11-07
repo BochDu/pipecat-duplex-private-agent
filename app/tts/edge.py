@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from app.audio.player import (
+    CLOSE_TIMEOUT,
     PLAYBACK_RATE,
     PREROLL_LONG_MS,
     silence,
@@ -71,6 +72,7 @@ class EdgeTTS(TTS):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        self._procs = [decoder]
         player = await spawn(self._device)
         self._procs = [decoder, player]
         pump = asyncio.create_task(self._pump(decoder.stdout, player.stdin))
@@ -89,7 +91,9 @@ class EdgeTTS(TTS):
             await pump
             await asyncio.gather(decoder.wait(), player.wait())
         finally:
-            self._procs = []
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
+            await self.stop()
 
     async def _pump(self, source, target) -> None:
         """ffmpeg 的 PCM 流式写给 aplay；预热与首块一起写，避免设备空转。"""
@@ -129,11 +133,29 @@ class EdgeTTS(TTS):
             logger.debug("保存调试 PCM 失败", exc_info=True)
 
     async def stop(self) -> None:
-        for proc in self._procs:
+        """终止并回收本轮的 ffmpeg / aplay；单个进程卡住不阻断其余清理。"""
+        procs, self._procs = self._procs, []
+        for proc in procs:
             if proc.returncode is None:
-                proc.terminate()
-        for proc in self._procs:
-            try:
-                await proc.wait()
-            except Exception:  # noqa: BLE001 - 终止期不阻断
-                pass
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        for proc in procs:
+            await self._reap(proc)
+
+    async def _reap(self, proc: asyncio.subprocess.Process) -> None:
+        try:
+            await asyncio.wait_for(proc.wait(), CLOSE_TIMEOUT)
+        except Exception:  # noqa: BLE001 - 超时或等待异常都继续升级回收
+            logger.debug("TTS 子进程未按时退出（pid %s）", proc.pid, exc_info=True)
+        if proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), CLOSE_TIMEOUT)
+        except Exception:  # noqa: BLE001 - 终止期不阻断
+            logger.warning("TTS 子进程未能回收（pid %s）", proc.pid)

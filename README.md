@@ -52,6 +52,15 @@ AUDIO_OUT_DEVICE=plughw:3,0
 | `.venv/bin/python -m app.main --list` | 看唤醒词、配置组与凭据是否就位 |
 | `.venv/bin/python -m app.main --wake 豆包` | 不喊唤醒词，直接进一次会话 |
 | `.venv/bin/python -m app.main --volume 60` | 本次运行的播放端音量 |
+| `.venv/bin/python -m app.main --reset-db` | 删库重建（会话历史清空，配置不动） |
+
+## 开发
+
+```bash
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check app tests
+```
 
 ## 文档
 

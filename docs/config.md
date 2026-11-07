@@ -100,11 +100,11 @@ S2S 播报中检测到人声连续 250 ms 过阈值，就清空待播队列、�
 
 ## 出站与路径
 
-| 键 | 缺省 |
-| --- | --- |
-| `OUTBOUND_ALLOWLIST` | `openspeech.bytedance.com,api.deepseek.com,speech.platform.bing.com` |
-| `DATA_DIR` | `data` |
-| `SCRIPTS_DIR` | `scripts` |
-| `NOTES_DIR` / `ALLOWED_READ_DIRS` | 空（不启用） |
+| 键 | 缺省 | 说明 |
+| --- | --- | --- |
+| `OUTBOUND_ALLOWLIST` | `openspeech.bytedance.com,api.deepseek.com,speech.platform.bing.com` | 只登记，阶段 5 前不做运行时拦截 |
+| `DATA_DIR` | `data` | SQLite 与提示音缓存放这里 |
+| `SCRIPTS_DIR` | `scripts` | 阶段 5，尚无调用链 |
+| `NOTES_DIR` / `ALLOWED_READ_DIRS` | 空（不启用） | 阶段 5，`reindex()` 尚无调用链 |
 
 新增品牌时，非凭据默认值写进 `config/defaults.env`，凭据占位写进 `.env.example`。

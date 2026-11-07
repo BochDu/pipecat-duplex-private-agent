@@ -52,7 +52,7 @@ flowchart TB
 
 2. **注册表驱动**
 
-   `config/providers.toml` 是唯一的「唤醒词 → 配置组 → Provider」路由表；加模型 = 加一条 + 一组 `.env` 配置 + 一个 preflight 目录。
+   `config/providers.toml` 是唯一的「唤醒词 → 配置组 → Provider → 会话模板」路由表；加模型 = 加一条 + 一组 `.env` 配置 + 一个 preflight 目录。加一条新链路 = 在 `app/sessions/factory.py` 登记一个模板，路由代码不动。
 
 3. **统一 Provider 契约（静态）**
 
@@ -84,7 +84,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | `config/defaults.env` | 版本化、随代码提交 | 音色、音量、唤醒、超时、设备、白名单等已调好的默认值 | 开发者，调参时改 |
 | `.env`（模板 `.env.example`） | 私有、不入库 | 只放凭据；设备名等机器差异需要时覆盖 | 使用者，每台机器一份 |
-| `config/providers.toml` | 版本化、随代码提交 | 唤醒词、配置组名、链路形态<br/>Provider 实现、协议族、preflight 归属 | 开发者，加模型时改 |
+| `config/providers.toml` | 版本化、随代码提交 | 唤醒词、配置组名、链路形态<br/>Provider 实现、会话模板（`pipeline`）、协议族、preflight 归属 | 开发者，加模型时改 |
 
 这不是三个「个人配置入口」：每天要动的只有 `.env` 里的两个 key。覆盖顺序 `config/defaults.env` < `.env` < 真实环境变量，可调项见 [配置参考](config.md)。
 
@@ -151,6 +151,7 @@ flowchart TB
 │   │   ├── volcano_s2s/           # 豆包 Seeduplex（provider.py）
 │   │   └── openai_compat/         # DeepSeek 等 OpenAI 兼容 LLM（provider.py）
 │   ├── sessions/                  # 通用 Pipeline 模板（不含厂商代码）
+│   │   ├── factory.py             # 模板登记表：注册表 pipeline → 模板
 │   │   ├── s2s/                   # 端到端实时语音（pipeline.py）
 │   │   └── llm/                   # ASR → LLM → TTS（pipeline.py）
 │   ├── asr/                       # 语音识别（可插拔，当前火山一句话识别）
@@ -201,7 +202,7 @@ flowchart TB
 
 `wake_router.py` 在启动时加载注册表。唤醒命中后：
 
-- 按 `link` 选通用 Pipeline 模板
+- 按 Provider 声明的 `pipeline` 字段取模板（`sessions/factory.py` 登记）
 - 按 `provider` 懒加载对应实现
 - 从 `config_group` 指向的 `.env` 组取凭据
 
@@ -263,7 +264,7 @@ flowchart TB
 
 | 模块 | 细节 | 出口 / 落点 | 状态 |
 | --- | --- | --- | --- |
-| `app/tools/` | search / notes / notify / scheduler / files / memory / system<br/>同一份 Schema 生成 S2S 工具定义与 LLM `tools`<br/>分级授权内存态 `(session_id, scope)`，单次、本会话有效 | 即时结果回发起链路<br/>`tool_logs` 审计 | 骨架：`ToolSpec` / `ToolRegistry` 已定义，0 个工具注册 |
+| `app/tools/` | search / notes / notify / scheduler / files / memory / system<br/>同一份 Schema 生成 S2S 工具定义与 LLM `tools`<br/>分级授权内存态 `(session_id, scope)`，单次、本会话有效<br/>单工具 5 s 超时，失败或超时按 `role=tool` 回错误文本 | 即时结果回发起链路<br/>`tool_logs` 审计 | 骨架：`ToolSpec` / `ToolRegistry` 已定义，0 个工具注册 |
 | `app/jobs/` + `scheduler/` | 长工具异步化、定时任务、APScheduler 幂等恢复<br/>幂等键按 `call_id` 或任务 ID + 计划时间生成 | 结果回送当前会话<br/>会话已结束则降级微信推送 | 骨架：`Scheduler.start()` 只打日志，`JobManager.submit()` 无调用方 |
 | `app/events.py` + `storage/` | 统一事件落 SQLite<br/>`conversations` 用 `link` 标记来源<br/>写入走内存队列 + 后台批量提交 | 表清单见「数据与分级」 | 已用 |
 | `app/notes/` + `memory/` | `NOTES_DIR` 只读建索引、原文不入库<br/>会话结束统一抽取记忆<br/>本地摘要器保证 `local-only` 零出网 | `DATA_DIR` 读写，不与 `NOTES_DIR` 共用路径 | 骨架：`reindex()` / `remember()` / `extract()` 均无调用方 |
@@ -322,6 +323,8 @@ flowchart TB
 | `tasks` / `task_runs` / `background_jobs` | 任务、执行记录、幂等键<br/>作业状态与回送目标 `job_id` | 仅建表 |
 | `memories` / `notes_index` | 记忆<br/>笔记库只读索引（含 `sensitivity`） | 仅建表：`remember()` / `reindex()` 无调用方 |
 | `push_logs` / `tool_logs` | 审计：关联 ID、`call_id`、授权范围与时间 | 仅建表 |
+
+表结构按 `PRAGMA user_version` 版本化（`app/storage/__init__.py` 的 `MIGRATIONS`）：加表改列追加一版，旧库启动时自动补齐；不写迁移的临时环境用 `--reset-db` 重建。
 
 | 级别 | 范围 | 回流模型 | 微信推送 |
 | --- | --- | --- | --- |

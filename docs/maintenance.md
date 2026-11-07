@@ -36,6 +36,17 @@ sudo systemctl stop pipecat-agent
 
 换仓库目录或换运行用户后，服务里的绝对路径与 `User=` 失效，按 [安装](setup.md) ⑩ 重装一次再 `daemon-reload`。
 
+## 重建数据库
+
+会话历史损坏、或改了表结构又不想写迁移时，删库重建；`.env` 与模型文件不受影响。
+
+```bash
+sudo systemctl stop pipecat-agent
+.venv/bin/python -m app.main --reset-db
+```
+
+`--reset-db` 删掉 `data/agent.db` 与 WAL 边车文件后正常启动；只想删不启动就 `rm -f data/agent.db*`，下次启动自动建表。正常升级不需要它：表结构按 `PRAGMA user_version` 在启动时自动补齐。
+
 ## 改完什么要重启
 
 `.env` 与 `config/` 的键在进程启动时读取一次，以下改动都要 `sudo systemctl restart pipecat-agent` 才生效：

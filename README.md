@@ -55,7 +55,8 @@ AUDIO_OUT_DEVICE=plughw:3,0
 
 ## 文档
 
-- [安装与排障](docs/setup.md)：从零装到能跑
+- [安装](docs/setup.md)：从零装到能跑
+- [维护与排障](docs/maintenance.md)：更新代码、服务管理、改配置后重启、声音问题
 - [配置参考](docs/config.md)：音量、唤醒、会话参数与覆盖规则
 - [接入前检查](docs/preflight.md)：自检体系与新增模型流程
 - [技术方案](docs/architecture.md)：架构、目录规范、协议约束

@@ -175,7 +175,12 @@ flowchart TB
 │   └── llm_deepseek/
 ├── docs/
 │   ├── architecture.md
-│   └── proposal.md
+│   ├── proposal.md
+│   ├── setup.md                   # 从零安装
+│   ├── maintenance.md             # 更新、服务管理、排障
+│   ├── config.md
+│   ├── preflight.md
+│   └── plan.md
 ├── deploy/
 ├── scripts/
 ├── tests/

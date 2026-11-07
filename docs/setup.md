@@ -1,6 +1,6 @@
-# 安装与排障
+# 安装
 
-从零装到能跑。所有命令在仓库根目录执行。可调参数见 [配置参考](config.md)。
+从零装到能跑。所有命令在仓库根目录执行。可调参数见 [配置参考](config.md)，装好后的更新、重启与排障见 [维护与排障](maintenance.md)。
 
 ## 前置
 
@@ -133,25 +133,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pipecat-agent
 ```
 
-常用命令：
-
-```bash
-systemctl status pipecat-agent       # 是否在跑
-journalctl -u pipecat-agent -f       # 实时看日志（等同前台运行）
-sudo systemctl stop pipecat-agent    # 停止
-sudo systemctl disable pipecat-agent # 取消开机自启
-```
-
 注意两点：服务里写的是仓库的**绝对路径**，换目录后要重新装一次；`USB 声卡可能比服务晚就绪`，服务设置了失败 5 秒后自动重启，所以开机时日志里出现一两次重试属正常。
 
-## 跑不起来时
-
-| 现象 | 处理 |
-| --- | --- |
-| 没声音 / 放到 HDMI 或耳机口 | 设备改成 `plughw:N,0`，重跑 `bash preflight/audio-check.sh` |
-| 声音很小 | `amixer -c <card> sget PCM` 看出厂值，`sset PCM 100%` 拉满（`<card>` 用 `aplay -l` 的编号） |
-| `Device or resource busy` | 残留的 `arecord` 占着设备：`fuser -v /dev/snd/*` |
-| 云端连不上 | `.venv/bin/python preflight/env-check.py --link s2s`，再按 [接入前检查](preflight.md) 逐层定位 |
-| 唤醒不灵 / 误唤醒 | 阈值调整见 [配置参考](config.md) 的唤醒词一节 |
-
-装不上依赖、缺系统包、`pip check` 报冲突时，先确认 Python ≥ 3.11，并重看 ④ 的 `pip check` 输出。
+装了服务之后，启动、停止、看日志、更新代码与声音排障都用 [维护与排障](maintenance.md) 里的命令。

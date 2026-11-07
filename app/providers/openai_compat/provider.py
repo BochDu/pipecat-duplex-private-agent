@@ -29,8 +29,15 @@ class OpenAICompatProvider(BaseProvider):
         tools: ToolRegistry,
         on_event: Callable[[SessionEvent], None],
         on_audio: Callable[[bytes], None] | None = None,
+        on_interrupt: Callable[[str], None] | None = None,
     ) -> None:
-        super().__init__(config=config, tools=tools, on_event=on_event, on_audio=on_audio)
+        super().__init__(
+            config=config,
+            tools=tools,
+            on_event=on_event,
+            on_audio=on_audio,
+            on_interrupt=on_interrupt,
+        )
         self._client = None
         self._running = False
         self._tool_schemas: list[dict[str, Any]] = []
@@ -135,10 +142,12 @@ def create_provider(
     tools: ToolRegistry,
     on_event: Callable[[SessionEvent], None],
     on_audio: Callable[[bytes], None] | None = None,
+    on_interrupt: Callable[[str], None] | None = None,
 ) -> BaseProvider:
     return OpenAICompatProvider(
         config=settings.group(entry.config_group),
         tools=tools,
         on_event=on_event,
         on_audio=on_audio,
+        on_interrupt=on_interrupt,
     )

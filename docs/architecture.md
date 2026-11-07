@@ -56,7 +56,7 @@ flowchart TB
 
 3. **统一 Provider 契约（静态）**
 
-   `app/providers/base.py` 固定 `start`、`stop`、`send_audio_frame`、`register_tools`、`is_running`。不做 capabilities 协商、不做运行时发现、不做会话内切换。契约是为了让新增模型不动路由和后台，不是为了抽象而抽象。
+   `app/providers/base.py` 固定 `start`、`stop`、`send_audio_frame`、`register_tools`、`is_running`，另有可选的 `cancel_response`（取消服务端进行中的回答，默认空实现）。不做 capabilities 协商、不做运行时发现、不做会话内切换。契约是为了让新增模型不动路由和后台，不是为了抽象而抽象。
 
 4. **全局单例共享**
 
@@ -122,7 +122,7 @@ flowchart TB
 | 形态 | 端到端实时语音，单个 WebSocket 会话 | ASR → LLM → TTS |
 | Provider | `volcano_s2s` | `openai_compat`（多品牌共用） |
 | 音频 | 豆包：16 kHz PCM16 上行 / 24 kHz 下行 / 20 ms 帧<br/>其它品牌按各自协议 | 麦克风按 16 kHz 单声道采集<br/>ASR/TTS 规格随选型<br/>播报统一重采样 |
-| 判停 / 打断 | 服务端判停<br/>取消当前响应并清空播放缓冲 | 端侧 VAD / ASR 断句<br/>停 TTS 播放 + 丢弃当前 LLM 流 + 清空 ASR 缓冲 |
+| 判停 / 打断 | 服务端判停<br/>本地起音或服务端识别开口即停：清待播队列 + 结束 aplay + `response.cancel`<br/>被打断那一轮与「停」这类打断词触发的回话整轮不播 | 端侧 VAD / ASR 断句<br/>停 TTS 播放 + 丢弃当前 LLM 流 + 清空 ASR 缓冲 |
 | 工具 | 服务端函数调用事件 → `role=tool` 回传 | OpenAI 兼容 `tool_calls` → `role=tool` 消息回传 |
 | 上下文 | 会话事件<br/>建连时注入的本地跨会话摘要 | 本地消息数组（`system` / 历史 / 工具结果）<br/>按预算截断 |
 | 结束 | 静默超时 / 显式结束 / 断连<br/>落盘、抽取记忆、交回采集权 | 同左 |
@@ -207,7 +207,7 @@ flowchart TB
 | 待机 | LLM 称呼命中 | 建连中（三段式） | 交出采集权<br/>锁定 Provider<br/>起 ASR / TTS 与选中的 LLM 客户端 |
 | 建连中 | 就绪 | 会话中 | 起采集与播报<br/>注入本地摘要<br/>启空闲计时器 |
 | 建连中 | 鉴权失败 / 超时 / `error` | 待机 | 采集权交回<br/>语音回告<br/>不重试风暴<br/>不切另一模型 |
-| 会话中 | 插话 | 会话中 | 按本链路方式停播<br/>重置空闲计时器 |
+| 会话中 | 插话（本地起音 / 服务端识别开口） | 会话中 | 清空待播队列<br/>结束播放器（管道与 ALSA 缓冲一并丢弃）<br/>发 `response.cancel`<br/>被打断的回话不播<br/>重置空闲计时器 |
 | 会话中 | 另一称呼命中 | 结束中 → 建连中 | 先停活跃会话、释放连接与音频资源<br/>再启动新会话（强互斥） |
 | 会话中 | 计时器到阈值 / 断连 / 显式结束 | 结束中 | 关闭会话<br/>落盘断点<br/>后台作业继续 |
 | 结束中 | 资源已释放 | 待机 | 落盘 + 记忆抽取 + 采集权交回<br/>唤醒词重新监听 |
@@ -273,6 +273,7 @@ flowchart TB
 | 必选 | `session.model` = `1.2.6.1`<br/>`session.audio`（object）<br/>`session.audio.output.voice`<br/>`session.tools` 为标准 JSON Schema |
 | 上行 | `pcm` / 16 kHz / 单声道 / 20 ms 分片（640 B）<br/>Base64 放 JSON 文本帧<br/>严格实时节奏 |
 | 保活 | 依赖上行音频流<br/>关麦 `input_audio_mute.commit`<br/>恢复 `input_audio_unmute.commit` |
+| 打断 | 上行 `response.cancel` → 下行 ack `response.canceled`<br/>被取消的 `response_id` 永久丢弃，其余按「取消窗口 + 打断词抑制」兜底<br/>用户开口由 `conversation.item.input_audio_transcription.started` 上报 |
 | 下行 | `pcm_s16le` / 24 kHz，`response.output_audio.delta` Base64<br/>播放端解码并重采样 |
 | 容量 | 64K tokens 总量<br/>`conversation.item.create` 单次 ≤ 20 轮 / 40 条，分批提交 |
 | 工具 | `response.function_call_arguments.done.items[]` 可含多个并行调用<br/>一次 `conversation.item.create` 的 `items[]` 可带多个 `role=tool` 条目 |

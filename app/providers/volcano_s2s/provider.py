@@ -3,6 +3,11 @@
 协议依据 `preflight/s2s_doubao/`：`session.create` 建连，
 `input_audio_buffer.append`（Base64 PCM16/16 kHz/20 ms）上行，
 `response.output_audio.delta`（Base64 PCM16/24 kHz）下行。
+
+打断：客户端发 `response.cancel` 取消进行中的回答（ack 为 `response.canceled`）。
+从发出取消到下一个 `response.output_audio.started` 之间的 delta 一律丢弃；
+取消后 `CANCEL_GUARD_SEC` 内开始的那一段也丢弃——那是服务端对「停」这类打断词
+的回话，播出来就是反复应答。用户开口由 `input_audio_transcription.started` 上报。
 """
 
 from __future__ import annotations
@@ -13,6 +18,8 @@ import json
 import logging
 import math
 import struct
+import time
+from collections import deque
 from collections.abc import Callable
 
 from app.audio.gain import MAX_BOOST_DB, OnsetBoost
@@ -29,6 +36,9 @@ CLOSE_TIMEOUT = 3.0
 OUTPUT_RATE = 24000  # 下行 PCM16 采样率，协议固定
 SEG_LOG_SEC = 0.25  # 段首电平日志的窗口长度
 SEG_LOG_WINDOWS = 8  # 只记每段开头这么多窗
+CANCEL_GUARD_SEC = 0.6  # 取消后这段窗口内开始的回答属于打断词的回话，丢弃
+STOP_WORD_MAX_LEN = 6  # 超过这个字数的句子按正常提问处理，不当成「停」
+CANCELLED_KEEP = 16  # 只保留最近这么多个已取消的 response_id，长会话不涨内存
 
 
 def _window_db(mean_square: float) -> float:
@@ -48,14 +58,31 @@ class VolcanoS2SProvider(BaseProvider):
         tools: ToolRegistry,
         on_event: Callable[[SessionEvent], None],
         on_audio: Callable[[bytes], None] | None = None,
+        on_interrupt: Callable[[str], None] | None = None,
+        stop_words: str = "",
     ) -> None:
-        super().__init__(config=config, tools=tools, on_event=on_event, on_audio=on_audio)
+        super().__init__(
+            config=config,
+            tools=tools,
+            on_event=on_event,
+            on_audio=on_audio,
+            on_interrupt=on_interrupt,
+        )
         self._ws = None
         self._receiver: asyncio.Task | None = None
         self._running = False
         self._session_id = ""
         self._seq = 0
         self._tool_defs: list[dict] = []
+        self._stop_words = tuple(word.strip() for word in stop_words.split(",") if word.strip())
+        # 取消后的静默：这段窗口内开始的回答丢弃，不发往下游播放
+        self._muted = False
+        self._quiet_until = 0.0
+        self._suppress_turn = False  # 用户说了「停」：整轮回答都不播，直到下次开口
+        self._speaking_user = False
+        # 已取消的回答：按 response_id 丢弃，不依赖时间窗口；只留最近若干个
+        self._cancelled_ids: deque[str] = deque(maxlen=CANCELLED_KEEP)
+        self._last_response_id = ""
         self._onset = OnsetBoost(
             boost_db=self._onset_boost_db(),
             seconds=self._onset_sec(),
@@ -137,6 +164,12 @@ class VolcanoS2SProvider(BaseProvider):
             raise ProviderError("未收到 session.created")
 
         self._running = True
+        self._muted = False
+        self._quiet_until = 0.0
+        self._suppress_turn = False
+        self._speaking_user = False
+        self._cancelled_ids.clear()
+        self._last_response_id = ""
         logger.info(
             "豆包会话已建立：session.id=%s，音量 %d%%（loudness %+d），响度均衡=%s",
             self._session_id or "(空)",
@@ -300,6 +333,47 @@ class VolcanoS2SProvider(BaseProvider):
             logger.warning("上行中断：%s", exc)
             self._running = False
 
+    async def cancel_response(self) -> None:
+        """取消进行中的回答：先本地静默，服务端回收前的旧音频直接丢弃。"""
+        if self._ws is None or not self._running:
+            return
+        now = time.monotonic()
+        if self._muted and now < self._quiet_until:
+            return  # 刚取消过，服务端还在回收，不必再发一次
+        if self._last_response_id:
+            # 记下被打断的回答：它后续的 delta 一律丢，网络抖动也不漏
+            self._cancelled_ids.append(self._last_response_id)
+        self._muted = True
+        self._quiet_until = now + CANCEL_GUARD_SEC
+        try:
+            await asyncio.wait_for(
+                self._ws.send(json.dumps({"type": "response.cancel"})),
+                timeout=SEND_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("取消回答超时 %.0fs，按断连处理", SEND_TIMEOUT)
+            self._running = False
+        except Exception as exc:  # noqa: BLE001 - 取消失败不影响本地停播
+            logger.warning("取消回答失败：%s", exc)
+
+    def _is_stop_word(self, text: str) -> bool:
+        """短句且含打断词：判成「让它停」，不当成一次提问。
+
+        单字词只在整句就是它、或整句由它重复组成时命中，避免「停车场在哪」被误判。
+        """
+        if not self._stop_words:
+            return False
+        compact = "".join(
+            ch for ch in text if ch not in " \t\r\n，。！？、,.!?~～…"
+        )
+        if not compact or len(compact) > STOP_WORD_MAX_LEN:
+            return False
+        if compact in self._stop_words:
+            return True
+        if any(len(word) >= 2 and word in compact for word in self._stop_words):
+            return True
+        return len(set(compact)) == 1 and compact[0] in self._stop_words
+
     def register_tools(self, tools: ToolRegistry) -> None:
         """统一 Schema → session.tools（标准 JSON Schema，name 平级）。"""
         self._tool_defs = [
@@ -311,6 +385,11 @@ class VolcanoS2SProvider(BaseProvider):
             }
             for spec in tools.schemas()
         ]
+
+    @property
+    def current_response_id(self) -> str:
+        """最近一次下行的 response_id；空串表示服务端尚未给，日志排查用。"""
+        return self._last_response_id
 
     def is_running(self) -> bool:
         return self._running
@@ -341,6 +420,17 @@ class VolcanoS2SProvider(BaseProvider):
                 self._onset_used = True
             else:
                 self._onset.finish()
+            response_id = event.get("response_id") or ""
+            if response_id:
+                self._last_response_id = response_id
+            # 取消后紧接着开始的一段是打断词的回话，继续静默
+            self._muted = (
+                self._suppress_turn
+                or (response_id in self._cancelled_ids if response_id else False)
+                or time.monotonic() < self._quiet_until
+            )
+            if self._muted:
+                logger.info("丢弃被打断的回答（不播报）")
             return
 
         if etype == "response.output_audio.done":
@@ -348,6 +438,13 @@ class VolcanoS2SProvider(BaseProvider):
             return
 
         if etype in {"response.output_audio.delta", "response.audio.delta"}:
+            response_id = event.get("response_id") or ""
+            if response_id:
+                self._last_response_id = response_id
+                if response_id in self._cancelled_ids:
+                    return
+            if self._muted:
+                return
             payload = event.get("delta") or event.get("audio") or ""
             if payload:
                 raw_pcm = base64.b64decode(payload)
@@ -356,13 +453,18 @@ class VolcanoS2SProvider(BaseProvider):
                 self.emit_audio(out_pcm)
             return
 
+        if etype == "response.canceled":
+            self._muted = True
+            logger.info("服务端已确认取消回答")
+            return
+
         if etype in {
             "response.audio_transcript.delta",
             "response.output_text.delta",
             "response.text.delta",
         }:
             text = event.get("delta") or event.get("text") or ""
-            if text:
+            if text and not self._muted:
                 self.emit(
                     SessionEvent(
                         session_id=self._session_id,
@@ -373,11 +475,20 @@ class VolcanoS2SProvider(BaseProvider):
                 )
             return
 
+        if etype == "conversation.item.input_audio_transcription.started":
+            # 服务端识别出用户第一个字：本地起音没触发时（如被阈值挡掉）补一次停播
+            if not self._speaking_user:
+                self._speaking_user = True
+                self._suppress_turn = False  # 用户重新开口，上一轮的抑制到此为止
+                self.notify_interrupt("服务端识别到用户开口")
+            return
+
         if etype == "conversation.item.input_audio_transcription.delta":
             logger.debug("识别中：%s", event.get("delta") or "")
             return
 
         if etype == "conversation.item.input_audio_transcription.completed":
+            self._speaking_user = False
             # 服务端 ASR 结果：判断「麦克风有没有被听见」最直接的证据
             text = event.get("transcript") or ""
             if text:
@@ -390,6 +501,16 @@ class VolcanoS2SProvider(BaseProvider):
                         text=text,
                     )
                 )
+                if self._is_stop_word(text):
+                    # 「停」本身被当成一次提问：取消这一轮，且后续回话也不播
+                    self._suppress_turn = True
+                    self._muted = True
+                    logger.info(
+                        "用户要求停止（%r）：取消这一轮并丢弃回话，response_id=%s",
+                        text,
+                        self._last_response_id or "(空)",
+                    )
+                    await self.cancel_response()
             return
 
         if etype == "conversation.item.input_audio_transcription.failed":
@@ -461,10 +582,13 @@ def create_provider(
     tools: ToolRegistry,
     on_event: Callable[[SessionEvent], None],
     on_audio: Callable[[bytes], None] | None = None,
+    on_interrupt: Callable[[str], None] | None = None,
 ) -> BaseProvider:
     return VolcanoS2SProvider(
         config=settings.group(entry.config_group),
         tools=tools,
         on_event=on_event,
         on_audio=on_audio,
+        on_interrupt=on_interrupt,
+        stop_words=settings.get("S2S_STOP_WORDS", "") or "",
     )

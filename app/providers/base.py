@@ -1,8 +1,8 @@
 """统一 Provider 契约。
 
 固定 5 个方法：`start` / `stop` / `send_audio_frame` / `register_tools` /
-`is_running`。不做能力协商、不做运行时发现、不做会话内切换——契约只是为了让
-新增模型不动路由与共用后台。
+`is_running`，另加可选的 `cancel_response`。不做能力协商、不做运行时发现、
+不做会话内切换——契约只是为了让新增模型不动路由与共用后台。
 """
 
 from __future__ import annotations
@@ -34,11 +34,13 @@ class BaseProvider(abc.ABC):
         tools: "ToolRegistry",
         on_event: Callable[[SessionEvent], None],
         on_audio: Callable[[bytes], None] | None = None,
+        on_interrupt: Callable[[str], None] | None = None,
     ) -> None:
         self._config = dict(config)
         self._tools = tools
         self._on_event = on_event
         self._on_audio = on_audio
+        self._on_interrupt = on_interrupt
 
     @property
     def config(self) -> dict[str, str]:
@@ -52,6 +54,14 @@ class BaseProvider(abc.ABC):
         """下行音频交给会话侧播放；S2S 链路用，三段式不用。"""
         if self._on_audio is not None:
             self._on_audio(pcm)
+
+    def notify_interrupt(self, reason: str) -> None:
+        """下行判定「用户开口」时通知会话侧停播；不支持的 Provider 不调。"""
+        if self._on_interrupt is not None:
+            self._on_interrupt(reason)
+
+    async def cancel_response(self) -> None:
+        """取消服务端进行中的回答；默认无操作，由支持的 Provider 覆写。"""
 
     @abc.abstractmethod
     async def start(self) -> None:

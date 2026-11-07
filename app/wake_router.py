@@ -138,6 +138,7 @@ class WakeRouter:
             tools=self._ctx.tools,
             on_event=self._record,
             on_audio=self._on_audio,
+            on_interrupt=self._on_interrupt,
         )
 
     def _build_pipeline(self, entry: WakewordEntry, provider: BaseProvider):
@@ -188,6 +189,11 @@ class WakeRouter:
     def _on_audio(self, pcm: bytes) -> None:
         if self._pipeline is not None and hasattr(self._pipeline, "feed_audio"):
             self._pipeline.feed_audio(pcm)
+
+    def _on_interrupt(self, reason: str) -> None:
+        """Provider 判定用户开口：交给会话侧停播（只有 S2S 支持）。"""
+        if self._pipeline is not None and hasattr(self._pipeline, "interrupt"):
+            self._pipeline.interrupt(reason)
 
     def _record(self, event: SessionEvent) -> None:
         self._ctx.record(event)

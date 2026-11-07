@@ -71,6 +71,7 @@ AUDIO_OUT_DEVICE=plughw:3,0
 - [技术方案](docs/architecture.md)：架构、目录规范、协议约束
 - [阶段计划](docs/plan.md)
 - [项目提案](docs/proposal.md)
+- [项目复盘](docs/retrospective.md)：设计取舍、接口选型与调优历程
 
 ## 许可证
 

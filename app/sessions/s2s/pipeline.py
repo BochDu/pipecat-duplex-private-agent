@@ -460,6 +460,9 @@ class S2SPipeline:
                 chunk = await asyncio.wait_for(queue.get(), timeout=0.1)
             except asyncio.TimeoutError:
                 continue
+            # 离开队列就结账：这个计数用于估算「还有多少秒没播完」，
+            # 漏减会让会话永远认为还没播完，静默超时永不触发
+            self._queued_bytes = max(0, self._queued_bytes - len(chunk))
             player = self._player
             if player is None or player.stdin is None:
                 continue

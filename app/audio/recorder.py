@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 FRAME_MS = 20
 FRAME_BYTES = 640  # 16000 Hz * 2 字节 * 20 ms
-DEFAULT_THRESHOLD = 500.0
+#: 与 config/defaults.env 的 AUDIO_IN_SILENCE_RMS 一致；缺键时两条链路同口径
+DEFAULT_THRESHOLD = 900.0
 
 
 def rms(frame: bytes) -> float:

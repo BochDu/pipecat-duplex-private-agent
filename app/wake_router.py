@@ -13,15 +13,12 @@ import importlib
 import logging
 from enum import Enum
 
-from app.asr import build_asr
 from app.audio import play_chime
 from app.config import WakewordEntry
 from app.context import AppContext
 from app.events import SessionEvent
 from app.providers.base import BaseProvider, ProviderError
-from app.sessions.llm.pipeline import LLMPipeline
-from app.sessions.s2s.pipeline import S2SPipeline
-from app.tts import build_tts
+from app.sessions.factory import build_pipeline, speaks_first
 from app.wake import WakeListener
 
 logger = logging.getLogger(__name__)
@@ -98,8 +95,9 @@ class WakeRouter:
             if entry is None:
                 logger.info("未登记的唤醒词：%r", word)
                 continue
-            # S2S 唤醒后服务端自己会开口，不需要额外提示音；三段式才需要
-            if entry.link != "s2s":
+            # 服务端会先开口的模板不需要提示音，三段式才需要
+            pipeline = self._ctx.registry.pipeline_for(entry.provider)
+            if not speaks_first(pipeline):
                 await self._chime()
                 # 同一块 USB 声卡从播放切回采集需要一点时间
                 await asyncio.sleep(CHIME_SETTLE_SEC)
@@ -108,18 +106,9 @@ class WakeRouter:
     async def _chime(self) -> None:
         """唤醒即响：建连前先给反馈，避免用户以为没反应。"""
         settings = self._ctx.settings
-        if (settings.get("WAKE_CHIME", "") or "1").strip().lower() in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }:
+        if not settings.flag("WAKE_CHIME"):
             return
-        device = (
-            settings.get("AUDIO_OUT_DEVICE", "")
-            or settings.get("AUDIO_DEVICE", "")
-            or "default"
-        )
+        device = settings.out_device
         voice = settings.get("TTS_VOICE", "") or ""
         if not await play_chime(device, settings.out_volume, voice):
             logger.warning(
@@ -142,30 +131,14 @@ class WakeRouter:
         )
 
     def _build_pipeline(self, entry: WakewordEntry, provider: BaseProvider):
-        settings = self._ctx.settings
-        if entry.link == "s2s":
-            return S2SPipeline(
-                provider=provider,
-                settings=settings,
-                on_event=self._record,
-                on_audio=self._on_audio,
-            )
-        return LLMPipeline(
+        """按注册表声明的模板名构造，不再按 `link` 分支。"""
+        return build_pipeline(
+            self._ctx.registry.pipeline_for(entry.provider),
             provider=provider,
-            settings=settings,
-            on_event=self._record,
-            asr=build_asr(
-                settings.get("ASR_PROVIDER", "volcano") or "volcano", settings
-            ),
-            tts=build_tts(
-                settings.get("TTS_PROVIDER", "null") or "null",
-                settings.get("TTS_VOICE", "") or "",
-                settings.out_volume,
-                settings.get("AUDIO_OUT_DEVICE", "")
-                or settings.get("AUDIO_DEVICE", "")
-                or "default",
-            ),
+            settings=self._ctx.settings,
             tools=self._ctx.tools,
+            on_event=self._record,
+            on_audio=self._on_audio,
         )
 
     async def _release(self) -> None:

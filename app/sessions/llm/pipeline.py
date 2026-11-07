@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -128,31 +129,30 @@ class LLMPipeline:
                     ],
                 }
             )
-            for call in tool_calls:
-                try:
-                    args = json.loads(call["arguments"] or "{}")
-                except ValueError:
-                    args = {}
-                result = await self._tools.call(
-                    call["name"],
-                    args,
-                    session_id=self._session_id,
-                    link="llm",
-                    call_id=call["id"],
-                )
+            # 同轮多个工具并发跑，结果按原顺序回填；单个工具的超时在 ToolRegistry 里兜
+            results = await asyncio.gather(*(self._run_tool(call) for call in tool_calls))
+            for call, result in zip(tool_calls, results, strict=True):
                 messages.append(
                     {"role": "tool", "tool_call_id": call["id"], "content": result}
                 )
         return ""
 
+    async def _run_tool(self, call: dict) -> str:
+        try:
+            args = json.loads(call["arguments"] or "{}")
+        except ValueError:
+            args = {}
+        return await self._tools.call(
+            call["name"],
+            args,
+            session_id=self._session_id,
+            link="llm",
+            call_id=call["id"],
+        )
+
     def _wait_sec(self) -> float:
         """等下一句的额度，与 S2S 的静默超时共用同一个键。"""
-        raw = (self._settings.get("SILENCE_TIMEOUT_SEC", "") or "").strip()
-        try:
-            value = float(raw) if raw else 10.0
-        except ValueError:
-            value = 10.0
-        return max(3.0, min(120.0, value))
+        return self._settings.num("SILENCE_TIMEOUT_SEC", 10.0, lo=3.0, hi=120.0)
 
     def _emit(self, role: str, text: str) -> None:
         self._on_event(

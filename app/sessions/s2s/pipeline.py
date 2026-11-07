@@ -29,15 +29,21 @@ import time
 from collections.abc import Callable
 
 from app.audio import MicRecorder, rms, scale_pcm16
+from app.audio.player import (
+    PLAYBACK_RATE,
+    PREROLL_MS,
+    PREROLL_REOPEN_MS,
+    close as close_player,
+    prime as prime_player,
+    spawn as spawn_player,
+)
+from app.audio.recorder import DEFAULT_THRESHOLD
 from app.config import Settings
 from app.events import SessionEvent
 
 logger = logging.getLogger(__name__)
 
 FRAME_BYTES = 640
-PLAYBACK_RATE = 24000
-PREROLL_MS = 150  # 播放前先喂的静音：声卡打开后头几十毫秒会丢采样
-DEFAULT_THRESHOLD = 500.0
 LEVEL_LOG_SEC = 5.0
 SPEECH_HOLD_SEC = 0.6
 SEND_TIMEOUT = 6.0
@@ -47,7 +53,6 @@ BARGE_COOLDOWN_SEC = 0.8  # 两次打断的最小间隔，同一句话不反复�
 PLAY_REMAIN_MIN = 0.2  # 剩余待播时长低于这个值就认为已经播完，避免空打断
 PLAYER_SETTLE_SEC = 0.15  # 首播时等 aplay 打开声卡
 PLAYER_REOPEN_SEC = 0.05  # 打断后重建只做最短确认，换来起播更快
-REOPEN_PREROLL_MS = 60  # 重建后补的静音：抵消声卡重开的起播丢帧
 
 
 class S2SPipeline:
@@ -77,8 +82,8 @@ class S2SPipeline:
         self._queued_bytes = 0  # 队列里还没写进播放器的字节
         self._interrupted_at = float("-inf")
         self._cancel_tasks: set[asyncio.Task] = set()
-        self._barge_in = self._barge_enabled()
-        self._barge_rms = self._barge_rms_value()
+        self._barge_in = self._settings.flag("S2S_BARGE_IN")
+        self._barge_rms = self._settings.num("S2S_BARGE_IN_RMS", 1200.0)
 
     def feed_audio(self, pcm: bytes) -> None:
         """Provider 下行音频入队，由播放侧消费。"""
@@ -88,13 +93,15 @@ class S2SPipeline:
         self._queued_bytes += len(pcm)
 
     async def run(self) -> None:
-        in_device = self._device("AUDIO_IN_DEVICE")
-        out_device = self._device("AUDIO_OUT_DEVICE")
-        silence_sec = float(self._settings.get("SILENCE_TIMEOUT_SEC", "") or 10)
+        in_device = self._settings.in_device
+        out_device = self._settings.out_device
+        silence_sec = self._settings.num(
+            "SILENCE_TIMEOUT_SEC", 10.0, lo=3.0, hi=120.0
+        )
         recorder = MicRecorder(device=in_device)
         self._out_device = out_device
-        self._player = await self._spawn_player(out_device, PLAYER_SETTLE_SEC)
-        await self._prime_player(self._player)
+        self._player = await spawn_player(out_device, settle=PLAYER_SETTLE_SEC)
+        await prime_player(self._player, PREROLL_MS)
         # 不重建队列：provider.start() 后、run() 前到达的下行音频已在队里
         if self._audio_queue is None:
             self._audio_queue = asyncio.Queue()
@@ -123,7 +130,7 @@ class S2SPipeline:
             self._running = False
             await recorder.stop()
             player, self._player = self._player, None
-            await self._close_player(player)
+            await close_player(player)
             logger.info(
                 "S2S 会话结束（下行共播放 %.1fs）",
                 self._played_bytes / (PLAYBACK_RATE * 2),
@@ -132,7 +139,7 @@ class S2SPipeline:
     async def stop(self) -> None:
         self._running = False
         player, self._player = self._player, None
-        await self._close_player(player)
+        await close_player(player)
 
     def interrupt(self, reason: str) -> bool:
         """立刻停声并取消服务端这一轮回答；返回是否真的执行了打断。
@@ -236,19 +243,6 @@ class S2SPipeline:
         self._cancel_tasks.add(task)
         task.add_done_callback(self._cancel_tasks.discard)
 
-    def _barge_enabled(self) -> bool:
-        """本地起音打断开关，缺省开。"""
-        raw = (self._settings.get("S2S_BARGE_IN", "") or "1").strip().lower()
-        return raw not in {"0", "false", "no", "off"}
-
-    def _barge_rms_value(self) -> float:
-        """打断阈值，缺省高于说话阈值：避开扬声器回采。"""
-        raw = (self._settings.get("S2S_BARGE_IN_RMS", "") or "").strip()
-        try:
-            return float(raw) if raw else 1200.0
-        except ValueError:
-            return 1200.0
-
     def _log_volume(self) -> None:
         """音量分两层：服务端合成端与本地播放端，各自百分比独立。"""
         endpoint = self._settings.out_volume
@@ -262,95 +256,6 @@ class S2SPipeline:
                 endpoint,
             )
 
-    def _device(self, key: str) -> str:
-        """取设备名；两个新键都没配时退回旧的 `AUDIO_DEVICE`。"""
-        return (
-            self._settings.get(key, "")
-            or self._settings.get("AUDIO_DEVICE", "")
-            or "default"
-        )
-
-    async def _spawn_player(
-        self, device: str, settle: float = PLAYER_SETTLE_SEC
-    ) -> asyncio.subprocess.Process:
-        """起 aplay 接收裸 PCM；设备写错会立刻退出而非静默失败。"""
-        try:
-            player = await asyncio.create_subprocess_exec(
-                "aplay",
-                "-q",
-                "-D", device,
-                "-t", "raw",
-                "-f", "S16_LE",
-                "-r", str(PLAYBACK_RATE),
-                "-c", "1",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError("未安装 aplay：sudo apt install -y alsa-utils") from exc
-        await asyncio.sleep(settle)
-        if player.returncode is not None:
-            raise RuntimeError(
-                f"播放器启动失败（退出码 {player.returncode}）："
-                f"检查 AUDIO_OUT_DEVICE={device!r}，用 `aplay -l` 看可用设备"
-            )
-        return player
-
-    async def _prime_player(
-        self, player: asyncio.subprocess.Process, ms: int = PREROLL_MS
-    ) -> None:
-        """先喂一段静音，抵消 aplay 打开声卡后的起播丢帧。"""
-        silence = b"\x00" * (PLAYBACK_RATE * 2 * ms // 1000)
-        try:
-            assert player.stdin is not None
-            player.stdin.write(silence)
-            await player.stdin.drain()
-        except Exception:  # noqa: BLE001 - 预热失败不阻断会话
-            logger.debug("播放器预热失败", exc_info=True)
-
-    async def _close_player(
-        self, player: asyncio.subprocess.Process | None
-    ) -> None:
-        """关闭播放器：先收尾 stdin，再 terminate，卡住就 kill，确保不留僵尸。"""
-        if player is None:
-            return
-        try:
-            if player.stdin is not None and not player.stdin.is_closing():
-                player.stdin.close()
-        except Exception:  # noqa: BLE001 - 关闭期不阻断
-            logger.debug("播放器 stdin 关闭异常", exc_info=True)
-        if await self._wait_player(player, 2):
-            return
-        try:
-            player.terminate()
-        except ProcessLookupError:
-            return
-        except Exception:  # noqa: BLE001
-            logger.debug("播放器 terminate 异常", exc_info=True)
-            return
-        if await self._wait_player(player, 2):
-            return
-        try:
-            player.kill()
-        except ProcessLookupError:
-            return
-        except Exception:  # noqa: BLE001
-            logger.debug("播放器 kill 异常", exc_info=True)
-            return
-        if not await self._wait_player(player, 2):
-            logger.warning("播放器进程未能回收（pid %s）", player.pid)
-
-    async def _wait_player(
-        self, player: asyncio.subprocess.Process, timeout: float
-    ) -> bool:
-        """等进程退出；超时返回 False，交给调用方升级手段。"""
-        try:
-            await asyncio.wait_for(player.wait(), timeout=timeout)
-            return True
-        except Exception:  # noqa: BLE001 - 超时或等待异常都算没退出
-            return False
-
     async def _reopen_player(self) -> asyncio.subprocess.Process:
         """打断后重建 aplay：旧进程结束即丢掉管道与 ALSA 里的残留音频。
 
@@ -358,9 +263,9 @@ class S2SPipeline:
         否则声卡重开的头几十毫秒会被丢掉，听感是句首「噎一下」。
         """
         old, self._player = self._player, None
-        await self._close_player(old)
-        player = await self._spawn_player(self._out_device, PLAYER_REOPEN_SEC)
-        await self._prime_player(player, REOPEN_PREROLL_MS)
+        await close_player(old)
+        player = await spawn_player(self._out_device, settle=PLAYER_REOPEN_SEC)
+        await prime_player(player, PREROLL_REOPEN_MS)
         return player
 
     def _downlink_activity(self) -> float:
@@ -373,7 +278,7 @@ class S2SPipeline:
         活动只有两种：用户开口、服务端还在输出（任何下行事件）。等它思考、
         调工具、跑重试都不算，只消耗剩余额度。
         """
-        threshold = float(self._settings.get("AUDIO_IN_SILENCE_RMS", "") or DEFAULT_THRESHOLD)
+        threshold = self._settings.num("AUDIO_IN_SILENCE_RMS", DEFAULT_THRESHOLD)
         last_speech = time.monotonic()  # 最近一次检测到人声，用于判定说完
         active_at = last_speech  # 最近一次活动，静默从此刻累计
         sent = 0

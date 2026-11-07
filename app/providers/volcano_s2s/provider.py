@@ -70,6 +70,7 @@ class VolcanoS2SProvider(BaseProvider):
         )
         self._ws = None
         self._receiver: asyncio.Task | None = None
+        self._tool_tasks: set[asyncio.Task] = set()
         self._running = False
         self._session_id = ""
         self._seq = 0
@@ -298,6 +299,11 @@ class VolcanoS2SProvider(BaseProvider):
 
     async def stop(self) -> None:
         self._running = False
+        for task in list(self._tool_tasks):
+            task.cancel()
+        if self._tool_tasks:
+            await asyncio.gather(*self._tool_tasks, return_exceptions=True)
+            self._tool_tasks.clear()
         if self._receiver is not None:
             self._receiver.cancel()
             await asyncio.gather(self._receiver, return_exceptions=True)
@@ -548,7 +554,10 @@ class VolcanoS2SProvider(BaseProvider):
             return
 
         if etype == "response.function_call_arguments.done":
-            await self._handle_tool_calls(event)
+            # 工具放后台跑：慢工具不能堵住接收循环，否则下行音频 delta 会积压
+            task = asyncio.create_task(self._handle_tool_calls(event))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_task_done)
             return
 
         if etype == "error":
@@ -561,31 +570,41 @@ class VolcanoS2SProvider(BaseProvider):
 
         logger.debug("未处理的下行事件：%s %s", etype, event)
 
+    def _tool_task_done(self, task: asyncio.Task) -> None:
+        self._tool_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("工具调用任务异常：%s", exc)
+
+    async def _run_tool(self, item: dict) -> dict | None:
+        """执行一条工具调用；超时与失败由 ToolRegistry 转成文本回给模型。"""
+        function = item.get("function") or {}
+        name = item.get("name") or function.get("name")
+        raw_args = item.get("arguments") or function.get("arguments") or "{}"
+        call_id = item.get("call_id") or item.get("id")
+        if not name:
+            return None
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except ValueError:
+            args = {}
+        output = await self._tools.call(
+            name, args, session_id=self._session_id, link="s2s", call_id=call_id
+        )
+        # 官方示例：items 只带 call_id / role=tool / content，content.type 固定 input_text
+        return {
+            "call_id": call_id,
+            "role": "tool",
+            "content": [{"type": "input_text", "text": output}],
+        }
+
     async def _handle_tool_calls(self, event: dict) -> None:
         items = event.get("items") or event.get("calls") or []
-        results = []
-        for item in items:
-            function = item.get("function") or {}
-            name = item.get("name") or function.get("name")
-            raw_args = item.get("arguments") or function.get("arguments") or "{}"
-            call_id = item.get("call_id") or item.get("id")
-            if not name:
-                continue
-            try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except ValueError:
-                args = {}
-            output = await self._tools.call(
-                name, args, session_id=self._session_id, link="s2s", call_id=call_id
-            )
-            # 官方示例：items 只带 call_id / role=tool / content，content.type 固定 input_text
-            results.append(
-                {
-                    "call_id": call_id,
-                    "role": "tool",
-                    "content": [{"type": "input_text", "text": output}],
-                }
-            )
+        # 同轮多个工具并发跑，结果按 items 原顺序回传
+        outputs = await asyncio.gather(*(self._run_tool(item) for item in items))
+        results = [item for item in outputs if item is not None]
         if results and self._ws is not None:
             try:
                 await asyncio.wait_for(

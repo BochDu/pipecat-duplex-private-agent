@@ -68,7 +68,9 @@ class OpenAICompatProvider(BaseProvider):
         return self._running
 
     async def chat(self, messages: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-        """流式产出：`{"type": "text", "delta": str}` 或 `{"type": "tool_calls", "calls": [...]}`。"""
+        """流式产出：文本 `{"type": "text", "delta": str}` 或
+        `{"type": "tool_calls", "calls": [...]}`。
+        """
         try:
             import httpx
         except ModuleNotFoundError as exc:

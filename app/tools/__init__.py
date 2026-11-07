@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -15,6 +16,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 SENSITIVITY_LEVELS = ("public", "internal", "local-only")
+#: 单个工具上限：检索慢一点可以等，不能把整条下行堵死
+TOOL_TIMEOUT_SEC = 5.0
 
 
 @dataclass
@@ -87,13 +90,24 @@ class ToolRegistry:
         ):
             return f"工具 {name} 需要单次授权（{spec.sensitivity}）"
         try:
-            result = spec.handler(**arguments)
-            if inspect.isawaitable(result):
-                result = await result
+            result = await asyncio.wait_for(
+                self._invoke(spec.handler, arguments), timeout=TOOL_TIMEOUT_SEC
+            )
             return str(result)
+        except asyncio.TimeoutError:
+            logger.warning("工具超时：%s（>%.0fs）", name, TOOL_TIMEOUT_SEC)
+            return f"工具 {name} 超时（超过 {TOOL_TIMEOUT_SEC:.0f} 秒）"
         except Exception as exc:  # noqa: BLE001 - 工具失败只回告，不中断会话
             logger.exception("工具执行失败：%s", name)
             return f"工具执行失败：{type(exc).__name__}"
+
+    @staticmethod
+    async def _invoke(handler: Callable[..., Any], arguments: dict[str, Any]) -> Any:
+        """同步 handler 放线程里跑，避免占住事件循环；异步 handler 直接 await。"""
+        if inspect.iscoroutinefunction(handler):
+            return await handler(**arguments)
+        result = await asyncio.to_thread(handler, **arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def audit_entry(
         self, *, call_id: str | None, session_id: str, name: str, arguments: dict

@@ -22,9 +22,13 @@ config_group = "LLM_DEEPSEEK"
 link = "llm"
 provider = "openai_compat"
 
+# 每个 Provider 必须写 pipeline（运行时会话模板，见 app/sessions/factory.py）；
+# protocol / audio 是给人看的说明字段，运行时不读。
+
 [providers.volcano_s2s]
 protocol = "seeduplex"
 audio = "16k_in_24k_out_20ms"
+pipeline = "sessions/s2s"
 preflight = "preflight/s2s_doubao/"
 
 [providers.openai_compat]

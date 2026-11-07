@@ -22,6 +22,7 @@ from pathlib import Path
 
 from app.asr.base import ASR
 from app.audio import MicRecorder
+from app.audio.recorder import DEFAULT_THRESHOLD
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -144,32 +145,15 @@ class VolcanoASR(ASR):
         self._api_key = settings.get("ASR_VOLCANO_API_KEY", "") or ""
         self._resource = settings.get("ASR_VOLCANO_RESOURCE_ID", "") or DEFAULT_RESOURCE
         self._url = settings.get("ASR_VOLCANO_WS_URL", "") or DEFAULT_WS
-        self._device = settings.get("AUDIO_IN_DEVICE", "") or "default"
-        raw_silence = (settings.get("ASR_SILENCE_MS", "") or "").strip()
-        try:
-            self._silence_ms = int(float(raw_silence)) if raw_silence else 1200
-        except ValueError:
-            self._silence_ms = 1200
-        self._silence_ms = max(300, min(3000, self._silence_ms))
-        # 等起音的上限，与 S2S 的静默超时共用同一个键；会话层还会用 deadline 收紧
-        raw_wait = (settings.get("SILENCE_TIMEOUT_SEC", "") or "").strip()
-        try:
-            self._wait_sec = float(raw_wait) if raw_wait else 10.0
-        except ValueError:
-            self._wait_sec = 10.0
-        self._wait_sec = max(3.0, min(120.0, self._wait_sec))
+        self._device = settings.in_device
+        self._silence_ms = settings.int("ASR_SILENCE_MS", 1200, lo=300, hi=3000)
+        # 等起音的额度也取自同一个键（默认 10 s），会话层再用 deadline 收紧
+        self._wait_sec = settings.num("SILENCE_TIMEOUT_SEC", 10.0, lo=3.0, hi=120.0)
         # 单句上限：超过就强制判停上传，避免一句录太久
-        raw_max = (settings.get("ASR_MAX_UTTERANCE_SEC", "") or "").strip()
-        try:
-            self._max_ms = int(float(raw_max) * 1000) if raw_max else 15000
-        except ValueError:
-            self._max_ms = 15000
-        self._max_ms = max(3000, min(60000, self._max_ms))
-        raw_threshold = (settings.get("AUDIO_IN_SILENCE_RMS", "") or "").strip()
-        try:
-            self._threshold = float(raw_threshold) if raw_threshold else 900.0
-        except ValueError:
-            self._threshold = 900.0
+        self._max_ms = int(
+            settings.num("ASR_MAX_UTTERANCE_SEC", 15.0, lo=3.0, hi=60.0) * 1000
+        )
+        self._threshold = settings.num("AUDIO_IN_SILENCE_RMS", DEFAULT_THRESHOLD)
         self._last_payload: dict = {}
         if "replace-me" in self._api_key or not self._api_key:
             raise RuntimeError("先在 .env 填好 ASR_VOLCANO_API_KEY（ASR_PROVIDER=volcano）")

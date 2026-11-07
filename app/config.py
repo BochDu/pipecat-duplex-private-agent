@@ -104,6 +104,51 @@ class Settings:
     def has_group(self, name: str) -> bool:
         return bool(self.groups.get(name))
 
+    def num(
+        self,
+        key: str,
+        default: float,
+        *,
+        lo: float | None = None,
+        hi: float | None = None,
+    ) -> float:
+        """读浮点值：缺失或写错都回落默认值，再按 `lo` / `hi` 夹紧。
+
+        各模块不再自己 try/except 和夹区间，同一键的范围只在这里声明一次。
+        """
+        raw = (self.get(key, "") or "").strip()
+        try:
+            value = float(raw) if raw else float(default)
+        except ValueError:
+            value = float(default)
+        if lo is not None:
+            value = max(lo, value)
+        if hi is not None:
+            value = min(hi, value)
+        return value
+
+    def int(
+        self,
+        key: str,
+        default: int,
+        *,
+        lo: int | None = None,
+        hi: int | None = None,
+    ) -> int:
+        """读整数值；允许 `1200.0` 这类写法，先转浮点再取整。"""
+        value = self.num(
+            key,
+            float(default),
+            lo=None if lo is None else float(lo),
+            hi=None if hi is None else float(hi),
+        )
+        return int(value)
+
+    def flag(self, key: str, default: bool = True) -> bool:
+        """读开关：`0/false/no/off` 为关，其余（含未配置）按 `default`。"""
+        raw = (self.get(key, "") or "").strip().lower()
+        return default if not raw else raw not in {"0", "false", "no", "off"}
+
     @property
     def data_dir(self) -> Path:
         return self._path("DATA_DIR", "data")
@@ -114,19 +159,27 @@ class Settings:
         return Path(value).expanduser() if value else None
 
     @property
+    def in_device(self) -> str:
+        """采集设备：`AUDIO_IN_DEVICE` → 旧的 `AUDIO_DEVICE` → `default`。"""
+        return self._device("AUDIO_IN_DEVICE")
+
+    @property
+    def out_device(self) -> str:
+        """播放设备：`AUDIO_OUT_DEVICE` → 旧的 `AUDIO_DEVICE` → `default`。"""
+        return self._device("AUDIO_OUT_DEVICE")
+
+    @property
     def out_volume(self) -> int:
         """播放端总音量百分比 0~200：100 为原始，>100 软件放大；缺省 100。"""
-        raw = (self.get("AUDIO_OUT_VOLUME", "") or "").strip()
-        try:
-            value = int(float(raw)) if raw else 100
-        except ValueError:
-            value = 100
-        return max(0, min(200, value))
+        return self.int("AUDIO_OUT_VOLUME", 100, lo=0, hi=200)
 
     @property
     def outbound_allowlist(self) -> list[str]:
         raw = self.get("OUTBOUND_ALLOWLIST", "") or ""
         return [item.strip() for item in raw.split(",") if item.strip()]
+
+    def _device(self, key: str) -> str:
+        return self.get(key, "") or self.get("AUDIO_DEVICE", "") or "default"
 
     def _path(self, key: str, default: str) -> Path:
         value = self.get(key, default) or default
@@ -153,6 +206,12 @@ class Registry:
             for item in data.get("wakewords", [])
         ]
         providers = data.get("providers", {})
+
+        for name, info in providers.items():
+            if not str(info.get("pipeline", "")).strip():
+                raise ValueError(
+                    f"Provider {name!r} 缺少 pipeline 字段（写成 sessions/<链路>）"
+                )
 
         by_word: dict[str, WakewordEntry] = {}
         for entry in entries:
@@ -193,5 +252,10 @@ class Registry:
     def resolve(self, word: str) -> WakewordEntry | None:
         return self.by_word.get(word)
 
-    def provider_info(self, name: str) -> dict:
-        return dict(self.providers.get(name, {}))
+    def pipeline_for(self, provider: str) -> str:
+        """该 Provider 对应的会话模板名（`config/providers.toml` 的 `pipeline`）。"""
+        info = self.providers.get(provider) or {}
+        pipeline = str(info.get("pipeline", "")).strip()
+        if not pipeline:
+            raise ValueError(f"Provider {provider!r} 未声明 pipeline")
+        return pipeline

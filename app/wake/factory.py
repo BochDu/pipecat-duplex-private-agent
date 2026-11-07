@@ -13,22 +13,6 @@ from app.wake.base import WakeListener
 logger = logging.getLogger(__name__)
 
 
-def _device(settings) -> str:
-    return (
-        settings.get("AUDIO_IN_DEVICE", "")
-        or settings.get("AUDIO_DEVICE", "")
-        or "default"
-    )
-
-
-def _number(settings, key: str, default):
-    raw = (settings.get(key, "") or "").strip()
-    try:
-        return type(default)(raw) if raw else default
-    except ValueError:
-        return default
-
-
 def build_listener(
     settings,
     words: list[str],
@@ -43,10 +27,10 @@ def build_listener(
             words=words,
             model_dir=settings.get("WAKEWORD_KWS_DIR", "") or "data/models/kws",
             keywords_file=settings.get("WAKEWORD_KWS_KEYWORDS", "") or "",
-            device=_device(settings),
-            num_threads=_number(settings, "WAKEWORD_KWS_THREADS", 2),
-            score=_number(settings, "WAKEWORD_KWS_SCORE", 1.0),
-            threshold=_number(settings, "WAKEWORD_KWS_THRESHOLD", 0.25),
+            device=settings.in_device,
+            num_threads=settings.int("WAKEWORD_KWS_THREADS", 2, lo=1, hi=16),
+            score=settings.num("WAKEWORD_KWS_SCORE", 1.0),
+            threshold=settings.num("WAKEWORD_KWS_THRESHOLD", 0.25),
         )
     if engine == "vosk":
         from app.wake.vosk_listener import VoskWakeListener
@@ -56,7 +40,7 @@ def build_listener(
             aliases=aliases or {},
             model_path=settings.get("WAKEWORD_MODEL_PATH", "")
             or "data/models/wakeword",
-            device=_device(settings),
+            device=settings.in_device,
             **kwargs,
         )
     raise ValueError(

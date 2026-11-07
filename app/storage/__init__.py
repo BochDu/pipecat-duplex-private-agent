@@ -3,7 +3,8 @@
 `conversations` 走内存队列 + 后台批量提交：S2S 每段文字都会产生一条事件，
 逐条 `commit()` 在 SD 卡上会阻塞事件循环，直接拖慢采集与打断时序。
 
-表结构与 [技术方案](../docs/architecture.md) 的「数据与分级」一致；
+表结构按 `PRAGMA user_version` 版本化：加表改列就追加一版 `MIGRATIONS`，
+旧库启动时自动补齐；不写迁移的临时环境直接 `--reset-db` 重建。
 `conversations` 用 `link` 标记来源链路，共享层不生成厂商字段。
 """
 
@@ -26,7 +27,9 @@ INSERT_EVENT = """
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-SCHEMA = """
+SCHEMA_VERSION = 1
+
+SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -100,6 +103,26 @@ CREATE TABLE IF NOT EXISTS tool_logs (
 );
 """
 
+#: 版本号 → 该版新增的 DDL；只追加，不修改已发布版本
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1}
+
+
+def reset_database(data_dir: Path | str) -> list[Path]:
+    """删掉 `agent.db` 与 WAL 边车文件，返回实际删除的路径。"""
+    base = Path(data_dir) / "agent.db"
+    removed: list[Path] = []
+    for path in (
+        base,
+        base.with_name(base.name + "-wal"),
+        base.with_name(base.name + "-shm"),
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        removed.append(path)
+    return removed
+
 
 class Storage:
     """进程内唯一的 SQLite 句柄。"""
@@ -120,9 +143,21 @@ class Storage:
         # WAL 让读写不互相阻塞，NORMAL 在 SD 卡上少一次 fsync
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        self._migrate()
         return self
+
+    def _migrate(self) -> None:
+        """按 `PRAGMA user_version` 逐版补齐表结构；只前进，不回退。"""
+        current = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"数据库版本 {current} 高于代码支持的 {SCHEMA_VERSION}："
+                "升级代码，或加 --reset-db 重建"
+            )
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            self.conn.executescript(MIGRATIONS[version])
+            self.conn.execute(f"PRAGMA user_version={version}")
+        self.conn.commit()
 
     @property
     def conn(self) -> sqlite3.Connection:

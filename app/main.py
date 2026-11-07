@@ -14,7 +14,7 @@ from app.jobs import JobManager
 from app.memory import MemoryManager
 from app.notes import NotesIndex
 from app.scheduler import Scheduler
-from app.storage import Storage
+from app.storage import Storage, reset_database
 from app.tools import ToolRegistry
 from app.wake import build_listener
 from app.wake_router import WakeRouter
@@ -78,7 +78,15 @@ def main(argv: list[str] | None = None) -> int:
         "--volume",
         type=int,
         metavar="0-200",
-        help="播放端音量，覆盖 .env 的 AUDIO_OUT_VOLUME；豆包响度另由 S2S_DOUBAO_LOUDNESS 在服务端调",
+        help=(
+            "播放端音量，覆盖 .env 的 AUDIO_OUT_VOLUME；"
+            "豆包响度另由 S2S_DOUBAO_LOUDNESS 在服务端调"
+        ),
+    )
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="删除 data/agent.db 后重建（会话历史与索引清空，配置不动）",
     )
     args = parser.parse_args(argv)
 
@@ -89,6 +97,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         print(format_registry(registry, settings))
         return 0
+
+    if args.reset_db:
+        removed = reset_database(settings.data_dir)
+        logger.warning(
+            "数据库已重置：%s",
+            "、".join(path.name for path in removed) if removed else "无旧文件",
+        )
 
     print(f"播放端音量：{settings.out_volume}%（100% 为原始）")
     context = build_context(registry, settings)

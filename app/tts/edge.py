@@ -7,13 +7,17 @@ import logging
 import time
 from pathlib import Path
 
+from app.audio.player import (
+    PLAYBACK_RATE,
+    PREROLL_LONG_MS,
+    silence,
+    spawn,
+)
 from app.tts.base import TTS
 
 logger = logging.getLogger(__name__)
 
-PLAY_RATE = 24000  # 与 S2S 下行一致；aplay 直出，不再经 ffplay/SDL
 PUMP_BYTES = 4096
-PREROLL_MS = 300  # 实测：去掉后 aplay 起播会丢开头，300 ms 静音可消除
 DEBUG_PCM = Path("data") / "tts-last.pcm"  # 最近一次送播放的 PCM，排查起播用
 
 
@@ -61,29 +65,13 @@ class EdgeTTS(TTS):
             "-ac",
             "1",
             "-ar",
-            str(PLAY_RATE),
+            str(PLAYBACK_RATE),
             "pipe:1",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        player = await asyncio.create_subprocess_exec(
-            "aplay",
-            "-q",
-            "-D",
-            self._device,
-            "-t",
-            "raw",
-            "-f",
-            "S16_LE",
-            "-r",
-            str(PLAY_RATE),
-            "-c",
-            "1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        player = await spawn(self._device)
         self._procs = [decoder, player]
         pump = asyncio.create_task(self._pump(decoder.stdout, player.stdin))
         try:
@@ -111,8 +99,8 @@ class EdgeTTS(TTS):
             if not first:
                 return
             # 预热和首块一次写入：分开写时若首包来迟，aplay 播完静音会 underrun
-            target.write(b"\x00" * (PLAY_RATE * 2 * PREROLL_MS // 1000))
-            if len(captured) < PLAY_RATE * 2 * 5:
+            target.write(silence(PREROLL_LONG_MS))
+            if len(captured) < PLAYBACK_RATE * 2 * 5:
                 captured.extend(first)
             target.write(first)
             await target.drain()
@@ -120,7 +108,7 @@ class EdgeTTS(TTS):
                 chunk = await source.read(PUMP_BYTES)
                 if not chunk:
                     break
-                if len(captured) < PLAY_RATE * 2 * 5:
+                if len(captured) < PLAYBACK_RATE * 2 * 5:
                     captured.extend(chunk)
                 target.write(chunk)
                 await target.drain()

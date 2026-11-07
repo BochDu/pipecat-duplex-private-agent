@@ -9,6 +9,7 @@ from array import array
 from pathlib import Path
 
 from app.audio.gain import scale_pcm16
+from app.audio.player import PREROLL_LONG_MS, play_pcm
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 NOTES = ((880.0, 0.10), (0.0, 0.04), (1174.7, 0.14), (0.0, 0.04), (1568.0, 0.18))
 AMPLITUDE = 22000
 FADE_SEC = 0.01
-PREROLL_MS = 300  # 实测：去掉后 aplay 起播会丢开头，300 ms 静音可消除
 SPOKEN_TEXT = "我在，请说"  # 人声提示：够长才不会被设备吞掉，也最像「可以说了」
 CACHE_DIR = Path("data")
 SPOKEN_VOLUME = 150  # 提示音比正文再响一点，唤醒瞬间环境噪声大
@@ -92,7 +92,7 @@ async def ensure_spoken_chime(voice: str, rate: int = 24000) -> Path | None:
         pcm, _ = await proc.communicate(bytes(buffer))
         if proc.returncode != 0 or not pcm:
             return None
-        silence = b"\x00" * (rate * 2 * PREROLL_MS // 1000)
+        silence = b"\x00" * (rate * 2 * PREROLL_LONG_MS // 1000)
         _write_pcm(path, silence + scale_pcm16(pcm, SPOKEN_VOLUME))
         logger.info(
             "已生成唤醒人声提示：%s（%.2f s）",
@@ -112,88 +112,17 @@ async def play_chime(
     if voice:
         path = spoken_path(voice)
         if path.exists():
-            logger.info("唤醒提示：人声 %s", path.name)
-            if await _play_pcm(path, device, rate):
-                return True
-            logger.warning("人声提示播放失败，改用音阶")
+            try:
+                data = path.read_bytes()
+            except OSError:
+                data = b""
+            if data:
+                logger.info("唤醒提示：人声 %s", path.name)
+                if await play_pcm(data, device, rate=rate):
+                    return True
+                logger.warning("人声提示播放失败，改用音阶")
     logger.info("唤醒提示：三声音阶")
-    return await _play_tones(device, volume, rate)
-
-
-async def _play_pcm(path: Path, device: str, rate: int) -> bool:
-    """裸 PCM 走 aplay 管道，与 S2S 播放同一条路径。"""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return False
-    if not data:
-        return False
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "aplay",
-            "-q",
-            "-D",
-            device,
-            "-t",
-            "raw",
-            "-f",
-            "S16_LE",
-            "-r",
-            str(rate),
-            "-c",
-            "1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (FileNotFoundError, OSError):
-        return False
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(data)
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await asyncio.wait_for(proc.wait(), timeout=5)
-    except Exception:  # noqa: BLE001 - 播放失败就回落到音阶
-        proc.kill()
-        await proc.wait()
-        return False
-    return proc.returncode == 0
-
-
-async def _play_tones(device: str, volume: int, rate: int) -> bool:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "aplay",
-            "-q",
-            "-D",
-            device,
-            "-t",
-            "raw",
-            "-f",
-            "S16_LE",
-            "-r",
-            str(rate),
-            "-c",
-            "1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (FileNotFoundError, OSError):
-        return False
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(b"\x00" * (rate * 2 * PREROLL_MS // 1000))
-        await proc.stdin.drain()
-        proc.stdin.write(scale_pcm16(chime_pcm(rate), volume))
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await asyncio.wait_for(proc.wait(), timeout=3)
-    except Exception:  # noqa: BLE001 - 提示音失败不影响会话
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        return False
-    return proc.returncode == 0
+    tones = scale_pcm16(chime_pcm(rate), volume)
+    return await play_pcm(
+        tones, device, rate=rate, prime_ms=PREROLL_LONG_MS, timeout=3
+    )

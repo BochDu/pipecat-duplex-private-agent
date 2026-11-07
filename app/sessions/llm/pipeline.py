@@ -51,18 +51,26 @@ class LLMPipeline:
         messages: list[dict] = [{"role": "system", "content": system}]
         self._session_id = f"llm:{uuid4().hex[:8]}"
         self._running = True
-        logger.info("三段式会话开始：%s", self._session_id)
+        wait_sec = self._wait_sec()
+        logger.info(
+            "三段式会话开始：%s（最后一条活动后 %.0fs 结束）",
+            self._session_id,
+            wait_sec,
+        )
         try:
             greeting = (self._settings.get("LLM_GREETING", "") or "").strip()
             if greeting:
                 logger.info("唤醒回应：%s", greeting)
                 await self._tts.speak(greeting)
+            # 额度只在「等用户开口」时消耗：用户一开口就作废，播完最后一句再重设
+            deadline = time.monotonic() + wait_sec
             while self._running:
                 heard = time.monotonic()
-                user = await self._asr.transcribe()
+                user = await self._asr.transcribe(deadline=deadline)
                 if not user:
                     break
                 heard_at = time.monotonic()
+                deadline = float("inf")  # 用户已开口，问答期间不判停
                 self._emit("user", user)
                 messages.append({"role": "user", "content": user})
                 answer = await self._turn(messages)
@@ -76,6 +84,7 @@ class LLMPipeline:
                         (answered_at - heard_at) * 1000,
                         (spoke_at - answered_at) * 1000,
                     )
+                deadline = time.monotonic() + wait_sec
         finally:
             self._running = False
             logger.info("三段式会话结束：%s", self._session_id)
@@ -135,6 +144,15 @@ class LLMPipeline:
                     {"role": "tool", "tool_call_id": call["id"], "content": result}
                 )
         return ""
+
+    def _wait_sec(self) -> float:
+        """等下一句的额度，与 S2S 的静默超时共用同一个键。"""
+        raw = (self._settings.get("SILENCE_TIMEOUT_SEC", "") or "").strip()
+        try:
+            value = float(raw) if raw else 10.0
+        except ValueError:
+            value = 10.0
+        return max(3.0, min(120.0, value))
 
     def _emit(self, role: str, text: str) -> None:
         self._on_event(

@@ -151,12 +151,12 @@ class VolcanoASR(ASR):
         except ValueError:
             self._silence_ms = 1200
         self._silence_ms = max(300, min(3000, self._silence_ms))
-        # 说完一句后等下一句的时长，与豆包会话用同一个键，两个链路行为一致
+        # 等起音的上限，与 S2S 的静默超时共用同一个键；会话层还会用 deadline 收紧
         raw_wait = (settings.get("SILENCE_TIMEOUT_SEC", "") or "").strip()
         try:
-            self._wait_sec = float(raw_wait) if raw_wait else 20.0
+            self._wait_sec = float(raw_wait) if raw_wait else 10.0
         except ValueError:
-            self._wait_sec = 20.0
+            self._wait_sec = 10.0
         self._wait_sec = max(3.0, min(120.0, self._wait_sec))
         # 单句上限：超过就强制判停上传，避免一句录太久
         raw_max = (settings.get("ASR_MAX_UTTERANCE_SEC", "") or "").strip()
@@ -174,12 +174,20 @@ class VolcanoASR(ASR):
         if "replace-me" in self._api_key or not self._api_key:
             raise RuntimeError("先在 .env 填好 ASR_VOLCANO_API_KEY（ASR_PROVIDER=volcano）")
 
-    async def transcribe(self) -> str:
-        """录一句送识别；识别为空说明没听清，再听一次，仍为空才结束会话。"""
+    async def transcribe(self, *, deadline: float | None = None) -> str:
+        """录一句送识别；识别为空说明没听清，再听一次，仍为空才结束会话。
+
+        `deadline` 限制等起音的额度，重试复用同一额度、不翻倍；已经录到声音后
+        识别必须跑完，否则这句白说。
+        """
         for attempt in range(1, RETRY + 1):
+            remaining = self._remaining(deadline)
+            if remaining <= 0:
+                logger.info("等起音额度用尽，结束会话")
+                return ""
             try:
                 audio = await MicRecorder(device=self._device).record_utterance(
-                    start_timeout=self._wait_sec,
+                    start_timeout=max(1.0, min(remaining, self._wait_sec)),
                     silence_ms=self._silence_ms,
                     max_ms=self._max_ms,
                     threshold=self._threshold,
@@ -217,6 +225,12 @@ class VolcanoASR(ASR):
             if attempt < RETRY:
                 logger.info("这次没听清，继续说（%d/%d）", attempt, RETRY)
         return ""
+
+    def _remaining(self, deadline: float | None) -> float:
+        """还能等多久起音；没有 deadline 就用配置值。"""
+        if deadline is None:
+            return self._wait_sec
+        return deadline - time.monotonic()
 
     async def _recognize(self, audio: bytes) -> str:
         try:

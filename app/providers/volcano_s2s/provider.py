@@ -165,6 +165,7 @@ class VolcanoS2SProvider(BaseProvider):
             raise ProviderError("未收到 session.created")
 
         self._running = True
+        self.last_downlink_at = time.monotonic()
         self._muted = False
         self._quiet_until = 0.0
         self._suppress_turn = False
@@ -429,6 +430,8 @@ class VolcanoS2SProvider(BaseProvider):
             self._flush_answer()  # 断在中途也要把已生成的文本落下
 
     async def _handle_event(self, event: dict) -> None:
+        # 任何下行事件都说明服务端还在动：思考、工具调用、播报都算活动
+        self.last_downlink_at = time.monotonic()
         etype = event.get("type", "")
 
         if etype == "response.output_audio.started":
@@ -593,6 +596,8 @@ class VolcanoS2SProvider(BaseProvider):
                     ),
                     timeout=SEND_TIMEOUT,
                 )
+                # 工具执行期间没有下行事件，回传这一刻重新记活动
+                self.last_downlink_at = time.monotonic()
             except asyncio.TimeoutError:
                 logger.warning("工具结果回传超时，按断连处理")
                 self._running = False

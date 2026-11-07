@@ -74,6 +74,7 @@ class S2SPipeline:
         self._last_write_at = float("-inf")
         self._written_total = 0  # 本段已写入播放器的字节，用于估算剩余时长
         self._play_started_at = 0.0
+        self._queued_bytes = 0  # 队列里还没写进播放器的字节
         self._interrupted_at = float("-inf")
         self._cancel_tasks: set[asyncio.Task] = set()
         self._barge_in = self._barge_enabled()
@@ -84,11 +85,12 @@ class S2SPipeline:
         if self._audio_queue is None:
             self._audio_queue = asyncio.Queue()
         self._audio_queue.put_nowait(pcm)
+        self._queued_bytes += len(pcm)
 
     async def run(self) -> None:
         in_device = self._device("AUDIO_IN_DEVICE")
         out_device = self._device("AUDIO_OUT_DEVICE")
-        silence_sec = float(self._settings.get("SILENCE_TIMEOUT_SEC", "") or 20)
+        silence_sec = float(self._settings.get("SILENCE_TIMEOUT_SEC", "") or 10)
         recorder = MicRecorder(device=in_device)
         self._out_device = out_device
         self._player = await self._spawn_player(out_device, PLAYER_SETTLE_SEC)
@@ -197,6 +199,11 @@ class S2SPipeline:
         played = max(0.0, now - self._play_started_at) * PLAYBACK_RATE * 2
         return self._written_total - played
 
+    def _remaining_play_seconds(self, now: float) -> float:
+        """还有多少秒的声音没放出来：队列里没写的 + 播放器缓冲里没放的。"""
+        pending = max(0.0, self._pending_bytes(now))
+        return (pending + self._queued_bytes) / (PLAYBACK_RATE * 2)
+
     def _note_written(self, size: int) -> None:
         """记一次写入：上一段已播完就重新起算，否则继续累加。"""
         now = time.monotonic()
@@ -214,9 +221,11 @@ class S2SPipeline:
         dropped = 0
         while True:
             try:
-                dropped += len(queue.get_nowait())
+                chunk = queue.get_nowait()
             except asyncio.QueueEmpty:
                 return dropped
+            dropped += len(chunk)
+            self._queued_bytes = max(0, self._queued_bytes - len(chunk))
 
     def _request_cancel(self) -> None:
         """让 Provider 取消服务端回答；不阻塞采集循环，失败只记日志。"""
@@ -354,21 +363,25 @@ class S2SPipeline:
         await self._prime_player(player, REOPEN_PREROLL_MS)
         return player
 
-    async def _upstream(self, recorder: MicRecorder, silence_sec: float) -> None:
-        """麦克风帧流持续上行；静默超时或 Provider 断开则结束会话。
+    def _downlink_activity(self) -> float:
+        """Provider 最近一次下行事件的时间；不支持该属性的 Provider 视为无活动。"""
+        return float(getattr(self._provider, "last_downlink_at", float("-inf")))
 
-        续时：检测到人声、或下行仍在播报，都把静默计时推到现在。
+    async def _upstream(self, recorder: MicRecorder, silence_sec: float) -> None:
+        """麦克风帧流持续上行；无活动超时或 Provider 断开则结束会话。
+
+        活动只有两种：用户开口、服务端还在输出（任何下行事件）。等它思考、
+        调工具、跑重试都不算，只消耗剩余额度。
         """
         threshold = float(self._settings.get("AUDIO_IN_SILENCE_RMS", "") or DEFAULT_THRESHOLD)
         last_speech = time.monotonic()  # 最近一次检测到人声，用于判定说完
-        active_at = last_speech  # 静默计时起点：人声或播报取最近一次
+        active_at = last_speech  # 最近一次活动，静默从此刻累计
         sent = 0
         peak = 0.0
         speaking = False
         voice_since: float | None = None
         last_report = last_speech
         last_level = 0.0
-        last_played = self._played_bytes
         async for frame in recorder.frames():
             now = time.monotonic()
             if not self._running:
@@ -385,11 +398,15 @@ class S2SPipeline:
                     logger.warning("上行发送超时 %.0fs，结束会话", SEND_TIMEOUT)
                     return
             sent += 1
-            played = self._played_bytes
-            if played > last_played:
-                # 服务端还在出声，对话仍在进行，同样续时
-                last_played = played
-                active_at = now
+            # 下行任何事件（思考、工具调用、播报）都算模型还在动
+            remote = self._downlink_activity()
+            if remote > active_at:
+                active_at = remote
+            # 事件比声音早到 1~1.5 s：把「还在放」的时间补上，
+            # 让计时从用户听到的最后一声开始，而不是从最后一条事件开始
+            buffered = self._remaining_play_seconds(now)
+            if buffered > 0:
+                active_at = max(active_at, now + buffered)
             level = rms(frame)
             last_level = level
             peak = max(peak, level)
@@ -404,7 +421,7 @@ class S2SPipeline:
                 voice_since = None
             if level >= threshold:
                 last_speech = now
-                active_at = now
+                active_at = max(active_at, now)
                 if not speaking:
                     speaking = True
                     logger.info("检测到说话：RMS %.0f（阈值 %.0f）", level, threshold)
@@ -412,7 +429,7 @@ class S2SPipeline:
                 if speaking and now - last_speech >= SPEECH_HOLD_SEC:
                     speaking = False
                 if now - active_at > silence_sec:
-                    logger.info("%.0fs 无人说话也无播报，结束会话", silence_sec)
+                    logger.info("%.0fs 无活动，结束会话", silence_sec)
                     return
             if now - last_report >= LEVEL_LOG_SEC:
                 logger.info(

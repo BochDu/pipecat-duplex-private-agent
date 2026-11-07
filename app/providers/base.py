@@ -41,6 +41,8 @@ class BaseProvider(abc.ABC):
         self._on_event = on_event
         self._on_audio = on_audio
         self._on_interrupt = on_interrupt
+        # 最近一次下行活动的时间：会话层据此判断「模型还在动」，不做静默计时
+        self.last_downlink_at = float("-inf")
 
     @property
     def config(self) -> dict[str, str]:

@@ -56,17 +56,12 @@ def _split_by_group(
 
 @dataclass(frozen=True)
 class WakewordEntry:
-    """注册表里的一条：唤醒词 → 配置组 → 链路 → Provider。
-
-    `aliases` 是该唤醒词的其它写法（同音、误识别），任一命中都算唤醒，
-    返回给路由的始终是 `word`。
-    """
+    """注册表里的一条：唤醒词 → 配置组 → 链路 → Provider。"""
 
     word: str
     config_group: str
     link: str
     provider: str
-    aliases: tuple[str, ...] = ()
 
 
 @dataclass
@@ -198,8 +193,7 @@ class Registry:
         path = root / "config" / "providers.toml"
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         entries = [
-            WakewordEntry(**{**item, "aliases": tuple(item.get("aliases") or ())})
-            for item in data.get("wakewords", [])
+            WakewordEntry(**item) for item in data.get("wakewords", [])
         ]
         providers = data.get("providers", {})
 
@@ -219,13 +213,6 @@ class Registry:
                 )
             if entry.word in by_word:
                 raise ValueError(f"唤醒词重复：{entry.word!r}")
-            for alias in entry.aliases:
-                if not alias.strip():
-                    raise ValueError(f"唤醒词 {entry.word!r} 有空变体")
-                if alias in by_word or alias == entry.word:
-                    raise ValueError(
-                        f"唤醒词 {entry.word!r} 的变体 {alias!r} 与已有唤醒词重名"
-                    )
             by_word[entry.word] = entry
 
         return cls(
@@ -239,11 +226,6 @@ class Registry:
     @property
     def group_names(self) -> list[str]:
         return sorted({entry.config_group for entry in self.wakewords})
-
-    @property
-    def wakeword_aliases(self) -> dict[str, list[str]]:
-        """唤醒词 → 其它写法，供监听器做容错匹配。"""
-        return {entry.word: list(entry.aliases) for entry in self.wakewords}
 
     def resolve(self, word: str) -> WakewordEntry | None:
         return self.by_word.get(word)

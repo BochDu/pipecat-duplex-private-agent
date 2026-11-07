@@ -3,7 +3,6 @@
 
 用法：
   .venv/bin/python preflight/wake_check.py --seconds 30
-  .venv/bin/python preflight/wake_check.py --seconds 30 --engine vosk
 
 判据：每个唤醒词至少命中 2 次（脚本会提示你每个词说 3 次）。
 """
@@ -67,41 +66,16 @@ async def run(args) -> int:
     registry = Registry.load(ROOT)
     settings = Settings.load(ROOT, registry.group_names)
     words = [entry.word for entry in registry.wakewords]
-    aliases = registry.wakeword_aliases
-    device = args.device or settings.get("AUDIO_IN_DEVICE", "") or "default"
-    if args.engine == "kws":
-        model = (
-            args.model
-            or settings.get("WAKEWORD_KWS_DIR", "")
-            or "data/models/kws"
-        )
-        overrides = {"WAKEWORD_KWS_DIR": model}
-    else:
-        model = (
-            args.model
-            or settings.get("WAKEWORD_MODEL_PATH", "")
-            or "data/models/wakeword"
-        )
-        overrides = {"WAKEWORD_MODEL_PATH": model}
-    config = Override(
-        settings,
-        WAKEWORD_ENGINE=args.engine,
-        AUDIO_IN_DEVICE=device,
-        **overrides,
-    )
+    device = args.device or settings.in_device
+    model = args.model or settings.get("WAKEWORD_KWS_DIR", "") or "data/models/kws"
+    config = Override(settings, AUDIO_IN_DEVICE=device, WAKEWORD_KWS_DIR=model)
 
-    print(f"引擎：{args.engine}")
+    print("引擎：kws")
     print(f"模型：{model}")
     print(f"设备：{device}")
     print(f"唤醒词：{'、'.join(words)}", flush=True)
 
-    heard: list[str] = []
-    if args.engine == "vosk":
-        listener = build_listener(
-            config, words, aliases=aliases, verbose=True, on_text=heard.append
-        )
-    else:
-        listener = build_listener(config, words)
+    listener = build_listener(config, words)
     listener.load()  # 先把模型读进来，别把开头几句话喂给初始化
     print("2 秒后开始录音…", flush=True)
     await asyncio.sleep(2)
@@ -122,24 +96,12 @@ async def run(args) -> int:
         "# 唤醒词自检",
         "",
         f"- 时间：{datetime.now().astimezone().isoformat()}",
-        f"- 引擎：{args.engine}",
+        "- 引擎：kws",
         f"- 环境：{args.seconds} s 内每个词说 3 次，判据 ≥ {args.need} 次命中",
         f"- 设备：{device}",
         f"- 模型：{model}",
         f"- 唤醒词：{'、'.join(words)}",
     ]
-    if args.engine == "vosk":
-        lines.append(
-            "- 变体："
-            + (
-                "；".join(
-                    f"{word}={('、'.join(items) or '无')}"
-                    for word, items in aliases.items()
-                )
-                or "无"
-            )
-        )
-        lines.append(f"- 模型实际听到（最多 20 句）：{'、'.join(heard[:20]) or '无'}")
     lines += [
         "",
         "| 唤醒词 | 命中 | 结果 |",
@@ -161,7 +123,6 @@ async def run(args) -> int:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="唤醒词自检（离线）")
-    parser.add_argument("--engine", choices=["kws", "vosk"], default="kws")
     parser.add_argument("--seconds", type=int, default=30, help="监听时长（秒）")
     parser.add_argument("--need", type=int, default=2, help="每个词至少命中几次算通过")
     parser.add_argument("--model", default="", help="模型目录，默认读 .env")

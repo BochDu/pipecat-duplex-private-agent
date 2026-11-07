@@ -32,7 +32,7 @@
 
 | 键 | 缺省 | 说明 |
 | --- | --- | --- |
-| `WAKEWORD_ENGINE` | `kws` | `kws` 关键词检测 / `vosk` 离线 ASR |
+| `WAKEWORD_ENGINE` | `kws` | 关键词检测，当前唯一引擎 |
 | `WAKEWORD_KWS_DIR` | `data/models/kws` | kws 模型目录 |
 | `WAKEWORD_KWS_KEYWORDS` | `data/models/kws/keywords.txt` | 关键词表，拼音 token + `@` + 中文 |
 | `WAKEWORD_KWS_THRESHOLD` | `0.25` | 越低越易触发 |
@@ -51,7 +51,7 @@ d òu b āo @豆包
 d à f éi y ú @大肥鱼
 ```
 
-备选引擎 `vosk`（离线 ASR + 文本匹配，自造词识别不准）：`WAKEWORD_ENGINE=vosk`，模型放 `data/models/wakeword`。会话期间不监听唤醒词；换引擎必须结束当前会话再唤醒。
+唤醒只在待机期进行，会话期间不监听；换唤醒词或模型需结束当前会话后重启进程才生效。
 
 ## 会话与判定
 

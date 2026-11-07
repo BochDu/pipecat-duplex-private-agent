@@ -121,11 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             words = "、".join(entry.word for entry in registry.wakewords)
             print(f"待机中，说「{words}」进入会话（Ctrl-C 退出）：")
             await router.serve(
-                build_listener(
-                    settings,
-                    [e.word for e in registry.wakewords],
-                    aliases=registry.wakeword_aliases,
-                )
+                build_listener(settings, [e.word for e in registry.wakewords])
             )
         finally:
             await router.stop()

@@ -367,7 +367,7 @@ flowchart TB
 
 ## 依赖与版本
 
-`requirements.txt` 声明范围约束（`>=`），**当前没有 lock 文件**；`pipecat/` 只读留档，不参与安装，也不在依赖里。运行时依赖 `websockets` / `httpx` / `edge-tts` / `sherpa-onnx` / `vosk`，Python < 3.11 时另需 `tomli`。
+`requirements.txt` 声明范围约束（`>=`），**当前没有 lock 文件**；`pipecat/` 只读留档，不参与安装，也不在依赖里。运行时依赖 `websockets` / `httpx` / `edge-tts` / `sherpa-onnx`；TOML 用 Python 3.11+ 自带的 `tomllib`。
 
 版本锚点（升级准入单元）**尚未落地**（阶段 4 门禁）：
 
